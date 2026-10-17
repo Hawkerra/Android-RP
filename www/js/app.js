@@ -10,7 +10,7 @@ import {
 import {
   buildPrompt, generate, cleanReply, listModels, pickSpeakers, macros, estimateTokens,
   buildContinuityCheck, parseContinuity, locateQuote, PERSONA_SPLIT_PROMPT, parsePersonaSplit,
-  emptyTracker, buildTrackerUpdate, parseTrackerUpdate, mergeTracker,
+  emptyTracker, buildTrackerUpdate, parseTrackerUpdate, mergeTracker, openingInstruction,
 } from './engine.js';
 import { saveFile, onBack, isNative } from './native.js';
 import {
@@ -1214,7 +1214,7 @@ function viewChat(chat) {
     sub: isGroup ? `${members.length} characters · ${{ natural: 'natural order', round: 'round robin', manual: 'manual turns' }[chat.groupMode]}` : '',
     actions: `<button class="icon-btn" data-act="tracker" aria-label="Scene tracker">${ICON.scene}<span id="trackerDot" class="tdot ${S.trackerStatus?.[chat.id]?.status || ''}"></span></button><button class="icon-btn" data-act="chatMore" aria-label="Chat options">${ICON.more}</button>`,
   })}
-  <main class="scroll chat-scroll" id="msgs">${chat.messages.map((m, i) => msgHtml(chat, m, i)).join('') || `<div class="empty"><p>Say something to start the scene.</p></div>`}</main>
+  <main class="scroll chat-scroll" id="msgs">${chat.messages.map((m, i) => msgHtml(chat, m, i)).join('') || `<div class="empty"><p>Say something to start the scene, or tap send with an empty box to have ${esc(members[0]?.name || 'the character')} open it.</p></div>`}</main>
   <footer class="composer">
     ${isGroup ? `<div class="speakers">${members.map((m) => `<button class="speaker ${chat.mutedIds.includes(m.id) ? 'muted' : ''}" data-act="speak" data-id="${m.id}"><img src="${avatarOf(m)}" alt=""><span>${esc(m.name.split(' ')[0])}</span></button>`).join('')}</div>` : ''}
     <div class="director ${chat.director?.text ? 'open' : ''}" id="director">
@@ -1266,7 +1266,7 @@ function viewChat(chat) {
       e.stopPropagation();
       const m = findMsg(el.dataset.id);
       if (m.swipeIdx < m.swipes.length - 1) { m.swipeIdx++; saveChat(chat); rerenderMsg(chat, m); return; }
-      if (!S.abort) regenerate(chat, m);
+      if (!S.abort) (isOpening(chat, m) ? regenerateOpening(chat, m) : regenerate(chat, m));
     },
     msgMenu: (el, e) => { if (e.target.closest('.swipes, .edit-ta, button')) return; msgMenu(chat, findMsg(el.dataset.id)); },
     ccReview: (el, e) => { e.stopPropagation(); reviewContinuity(chat, findMsg(el.dataset.id)); },
@@ -1363,7 +1363,7 @@ function msgMenu(chat, m) {
   menu(null, [
     { label: 'Edit', run: () => { S.editingMsg = m.id; renderMessages(chat); } },
     { label: 'Copy text', run: () => { navigator.clipboard?.writeText(msgText(m)).then(() => toast('Copied'), () => toast('Copy failed')); } },
-    isLastChar && { label: 'Regenerate (new swipe)', run: () => !S.abort && regenerate(chat, m) },
+    isLastChar && { label: isOpening(chat, m) ? 'Rewrite opening…' : 'Regenerate (new swipe)', run: () => !S.abort && (isOpening(chat, m) ? regenerateOpening(chat, m) : regenerate(chat, m)) },
     isLastChar && { label: 'Continue this message', run: () => !S.abort && continueMsg(chat, m) },
     m.role === 'char' && { label: 'Check continuity', run: () => checkContinuity(chat, m) },
     { label: 'Branch from here (new chat)', run: async () => {
@@ -1406,6 +1406,16 @@ async function sendMessage(chat, forceSpeakerId = null) {
     renderMessages(chat); scrollToBottom(true);
   }
 
+  // An empty chat has no story yet: ask the player where the opening should start.
+  if (!chat.messages.length && !text) {
+    const sp = forceSpeakerId ? S.chars[forceSpeakerId] : pickSpeakers(chat, S.chars, '', personaFor(chat).name)[0]
+      || S.chars[chat.characterIds.find((id) => !chat.mutedIds.includes(id))];
+    if (!sp) return toast('This chat has no characters — add some in chat settings');
+    const guidance = await askOpening(chat, sp);
+    if (guidance == null) return;
+    return runTurns(chat, [sp], { direction: guidance, extra: openingInstruction(sp.name, personaFor(chat).name) });
+  }
+
   let speakers;
   if (forceSpeakerId) speakers = [S.chars[forceSpeakerId]];
   else {
@@ -1419,11 +1429,10 @@ async function sendMessage(chat, forceSpeakerId = null) {
   await runTurns(chat, speakers.filter(Boolean));
 }
 
-async function runTurns(chat, speakers) {
+async function runTurns(chat, speakers, { direction = chat.director?.text?.trim() || '', extra = '' } = {}) {
   S.abort = new AbortController();
   S.genChatId = chat.id;
   setSendButton(chat);
-  const direction = chat.director?.text?.trim() || '';
   let anyOk = false;
   try {
     for (const sp of speakers) {
@@ -1431,7 +1440,7 @@ async function runTurns(chat, speakers) {
       const m = newMessage({ role: 'char', charId: sp.id, name: sp.name });
       chat.messages.push(m);
       renderMessages(chat); scrollToBottom(true);
-      const ok = await generateInto(chat, m, sp, 'reply', '', direction);
+      const ok = await generateInto(chat, m, sp, 'reply', extra, direction);
       if (!ok) break;
       anyOk = true;
       afterReply(chat, m);
@@ -1439,14 +1448,14 @@ async function runTurns(chat, speakers) {
   } finally {
     S.abort = null; S.genChatId = null;
     // A direction applies to one round of replies unless "keep" is on.
-    if (anyOk && direction && !chat.director.keep) { chat.director.text = ''; updateDirectorUi(chat); }
+    if (anyOk && chat.director?.text && !chat.director.keep) { chat.director.text = ''; updateDirectorUi(chat); }
     setSendButton(chat);
     await saveChat(chat);
     if (location.hash.startsWith('#/chat/' + chat.id)) renderMessages(chat);
   }
 }
 
-async function regenerate(chat, m, extraInstruction = '') {
+async function regenerate(chat, m, extraInstruction = '', direction = m.direction || '') {
   const sp = S.chars[m.charId];
   if (!sp) return toast('That character was deleted');
   restoreTrackerBefore(chat, m);
@@ -1454,10 +1463,53 @@ async function regenerate(chat, m, extraInstruction = '') {
   rerenderMsg(chat, m);
   S.abort = new AbortController(); S.genChatId = chat.id; setSendButton(chat);
   let ok = false;
-  try { ok = await generateInto(chat, m, sp, 'reply', extraInstruction, m.direction || ''); } finally {
+  try { ok = await generateInto(chat, m, sp, 'reply', extraInstruction, direction); } finally {
     S.abort = null; S.genChatId = null; setSendButton(chat); await saveChat(chat); renderMessages(chat);
   }
   if (ok) afterReply(chat, m);
+  return ok;
+}
+
+// ---------- opening post ----------
+
+/** The first message of a chat. It has nothing to continue from, so rewriting it asks for guidance. */
+const isOpening = (chat, m) => chat.messages[0] === m && m.role === 'char';
+
+/**
+ * Asks how the story should open. Resolves with the guidance ('' = let the AI decide) or null if cancelled.
+ * Prefilled with the Director note if one is set, else the guidance used last time.
+ */
+function askOpening(chat, speaker) {
+  const prefill = chat.director?.text?.trim() || chat.openingDirection || '';
+  const extras = [chat.world?.trim() && 'World', chat.story?.trim() && 'Story', chat.scenario?.trim() && 'Scenario'].filter(Boolean);
+  return sheet(`<h3>🎬 How should the scene open?</h3>
+    <p class="hint">The opening can start anywhere, so tell ${esc(speaker.name)} where to begin: where and when, what's going on, and anything or anyone who should be in it.${extras.length ? ` Your ${extras.join(' and ')} settings are used too.` : ''}</p>
+    <textarea class="input" rows="5" data-g placeholder="e.g. Late at night in the Rusty Anchor tavern. Kael is nursing a drink when {{user}} walks in soaked from the storm.">${esc(prefill)}</textarea>
+    <div class="row wrap end"><button class="btn ghost" data-x="cancel">Cancel</button><button class="btn" data-x="free">Surprise me</button><button class="btn primary" data-x="go">Generate opening</button></div>`,
+  (el, close) => {
+    const ta = el.querySelector('[data-g]');
+    setTimeout(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }, 60);
+    el.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-x]');
+      if (!b) return;
+      if (b.dataset.x === 'cancel') return close(null);
+      const g = b.dataset.x === 'free' ? '' : ta.value.trim();
+      if (b.dataset.x === 'go' && !g) { toast('Write some guidance, or tap Surprise me'); return; }
+      chat.openingDirection = g || chat.openingDirection || '';
+      saveChat(chat);
+      close(g);
+    });
+  });
+}
+
+async function regenerateOpening(chat, m) {
+  const sp = S.chars[m.charId];
+  if (!sp) return toast('That character was deleted');
+  const guidance = await askOpening(chat, sp);
+  if (guidance == null) return;
+  const ok = await regenerate(chat, m, openingInstruction(sp.name, personaFor(chat).name), guidance);
+  // The opening was the "next reply" the Director note was meant for.
+  if (ok && chat.director?.text && !chat.director.keep) { chat.director.text = ''; updateDirectorUi(chat); saveChat(chat); }
 }
 
 async function continueMsg(chat, m) {
@@ -1480,7 +1532,7 @@ async function generateInto(chat, m, speaker, mode, extraInstruction = '', direc
   const history = mode === 'continue' ? chat.messages.slice(0, idx + 1) : chat.messages.slice(0, idx);
   const base = mode === 'continue' ? msgText(m) : '';
   const prompt = buildPrompt(promptChat(chat), speaker, { settings: { ...S.settings, persona: personaFor(chat) }, characters: S.chars, books: booksFor(chat), history, mode, extraInstruction, direction });
-  if (direction) m.direction = direction;
+  if (mode !== 'continue') m.direction = direction; // what this version was asked to do (continuity check uses it)
   S.lastPrompt = { ...prompt, speaker: speaker.name, at: Date.now() };
 
   const join = (t) => (mode === 'continue' ? base + (base && t && !/^[\s,.!?;:'")\]]/.test(t) && !/\s$/.test(base) ? ' ' : '') + t : t);

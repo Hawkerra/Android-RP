@@ -242,6 +242,8 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
   if (chat.authorNote) inject(chat.authorNoteDepth ?? 4, `[Author's note: ${M(chat.authorNote)}]`);
 
   const messages = [{ role: 'system', content: system }, ...hist];
+  // With no history yet (an opening post), some APIs reject a prompt that has no user turn.
+  if (!hist.some((h) => h.role === 'user' || h.role === 'assistant')) messages.push({ role: 'user', content: '[Begin the story.]' });
   if (tail.length) messages.push({ role: 'system', content: tail.join('\n') });
   // Many backends require the conversation to end on a user turn.
   if (messages[messages.length - 1].role === 'assistant' && mode !== 'continue') {
@@ -589,4 +591,9 @@ export function mergeTracker(tr, update, { exclude = [], uid }) {
   }
   tr.updatedAt = now;
   return added;
+}
+
+/** Extra instruction for the first message of a chat, written from the player's guidance. */
+export function openingInstruction(speakerName, userName) {
+  return `[This is the very first message of the story. Write ${speakerName}'s opening scene, starting exactly where the director's note says. Establish where and when it begins and what is happening, then leave ${userName} a natural moment to respond. Do not write ${userName}'s actions, words or thoughts.]`;
 }

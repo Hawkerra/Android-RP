@@ -73,6 +73,11 @@ Both are sent to the bot as the frame for the story. The continuity check and sc
 * Regenerating a directed reply reuses its direction.
 * The continuity check knows about it, so things you directed aren't flagged.
 
+**Opening post:** the first message has no story to continue from, so rewriting it asks how the scene should open. This happens when you swipe past the last greeting, choose "Rewrite opening…", or start a chat whose character has no greeting by tapping send with an empty box.
+* The box is pre-filled with your Director note, or with what you used last time.
+* **Surprise me** lets the AI choose.
+* Other posts regenerate as usual, using the Director note if one is set.
+
 **🗺 Scene tracker** (map button in a chat): automatic notes kept for each chat. After each reply, the helper AI records:
 * the current location, time, who's present and what's happening
 * side characters, places, objects and facts that come up (not the main characters, who have their own cards)
