@@ -429,7 +429,7 @@ function homeSettings() {
   </section>
 
   <section class="panel"><h2>Prompts</h2>
-    <p class="hint">Macros: {{char}}, {{user}}, {{members}}, {{time}}, {{date}}, {{random:a,b,c}}, {{roll:2d6}}</p>
+    <p class="hint">Macros: {{char}}, {{user}}, {{members}}, {{time}}, {{date}}, {{random:a,b,c}}, {{roll:2d6}}. In a character's own system prompt or post-history override, {{original}} inserts the matching prompt from here.</p>
     <label>Main system prompt<textarea class="input" rows="4" data-bind="prompts.main"></textarea></label>
     <label>Group chat instruction<textarea class="input" rows="3" data-bind="prompts.group"></textarea></label>
     <label>Post-history instruction (jailbreak / style)<textarea class="input" rows="2" data-bind="prompts.postHistory"></textarea></label>
@@ -854,8 +854,8 @@ function viewCharEditor(c) {
       ${field('mes_example', 'Example dialogue', 4, 'Separate examples with <START>.')}
     </section>
     <section class="panel"><h2>Advanced</h2>
-      ${field('system_prompt', 'System prompt override', 2, 'Replaces the main prompt when this character speaks.')}
-      ${field('post_history_instructions', 'Post-history instructions', 2)}
+      ${field('system_prompt', 'System prompt override', 2, 'Replaces the main prompt when this character speaks. Put {{original}} where you want the main prompt from Settings included.')}
+      ${field('post_history_instructions', 'Post-history instructions', 2, 'Replaces the global post-history instruction. {{original}} includes the global one.')}
       <label class="slider">Talkativeness (group chats)<output>${c.talkativeness}</output><input type="range" min="0" max="1" step="0.05" data-bind="talkativeness"></label>
       <label>Tags<input class="input" data-bind="tags" data-type="list" placeholder="fantasy, adventure"></label>
       <label>Creator<input class="input" data-bind="creator"></label>

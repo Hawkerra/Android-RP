@@ -92,6 +92,9 @@ export function scanLorebooks(books, messages, nameFn) {
 
 // ---------- Prompt building ----------
 
+/** A card's override replaces the global prompt; {{original}} inside it inserts the global one. */
+const withOriginal = (override, original) => (override?.trim() ? override.replace(/{{original}}/gi, original || '') : original);
+
 /** The chat's optional World and Story fields. */
 function storyWorldBlocks(chat, M) {
   const out = [];
@@ -171,7 +174,7 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
 
   // --- System block ---
   const sys = [];
-  sys.push(M(speaker.system_prompt || settings.prompts.main));
+  sys.push(M(withOriginal(speaker.system_prompt, settings.prompts.main)));
   if (isGroup) sys.push(M(settings.prompts.group));
   if (lore.before.length) sys.push(M(lore.before.join('\n')));
 
@@ -206,7 +209,7 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
 
   // --- Trailing instructions ---
   const tail = [];
-  const phi = speaker.post_history_instructions || settings.prompts.postHistory;
+  const phi = withOriginal(speaker.post_history_instructions, settings.prompts.postHistory);
   if (phi) tail.push(M(phi));
   if (persona.private) tail.push(`[Reminder: ${userName}'s private background is unknown to the characters. Nobody may mention, know or act on it, or claim ${userName} revealed it, unless it has actually come up in the chat.]`);
   if (mode === 'continue') tail.push('[Continue ' + speaker.name + "'s last message from exactly where it stopped. Do not repeat it.]");

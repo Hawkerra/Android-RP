@@ -110,7 +110,7 @@ The bot is sent the current scene, plus the notes that matter right now: pinned 
 
 **Helper AI** (Settings): the connection and model for background jobs: continuity checks, the scene tracker and persona splitting. A cheaper or faster model works well.
 
-**Macros:** `{{char}}`, `{{user}}`, `{{members}}`, `{{time}}`, `{{date}}`, `{{random:a,b,c}}`, `{{roll:2d6}}`.
+**Macros:** `{{char}}`, `{{user}}`, `{{members}}`, `{{time}}`, `{{date}}`, `{{random:a,b,c}}`, `{{roll:2d6}}`. In a character's **System prompt override** or **Post-history instructions**, `{{original}}` inserts the global prompt from Settings, as in SillyTavern.
 
 **Backup:** Settings → Data → Export/Import backup. The backup file includes your API keys.
 
