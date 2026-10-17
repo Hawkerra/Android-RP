@@ -278,3 +278,4 @@ button.pick:active { background: var(--bg3); }
 .cc-diff { display: grid; gap: 6px; font-size: 14px; }
 .cc-diff del { background: rgb(239 93 108 / .12); color: #ffb3bb; padding: 6px 8px; border-radius: 8px; }
 .cc-diff ins { background: rgb(111 207 151 / .12); color: #a8ebc4; padding: 6px 8px; border-radius: 8px; text-decoration: none; }
+.sec-title { display: block; color: var(--fg); font-weight: 600; font-size: 14.5px; }

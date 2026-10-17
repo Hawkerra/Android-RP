@@ -92,6 +92,17 @@ export function scanLorebooks(books, messages, nameFn) {
 
 // ---------- Prompt building ----------
 
+/** The persona's private section: reference for the writer, explicitly outside the story. */
+function personaPrivateBlock(userName, text) {
+  return `<user_private_background name="${userName}">
+OUT-OF-CHARACTER REFERENCE ONLY. This is background on ${userName} for you, the writer, so you can portray them consistently. It is NOT part of the story so far:
+- The characters do not know any of it, and none of it has been said, shown or used in the story.
+- Never have a character mention, hint at, guess, or act on it, and never state or imply that ${userName} said, did, revealed or used any of it.
+- It only becomes part of the story once ${userName} reveals or demonstrates it in the chat, and even then only the parts that actually came up.
+${text}
+</user_private_background>`;
+}
+
 /**
  * Builds an OpenAI chat-completions messages array for `speaker` replying in `chat`.
  * opts: { settings, characters (map id->char), lorebooks (array of book objects), mode: 'reply'|'continue' }
@@ -128,7 +139,10 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
 
   const scenario = chat.scenario || speaker.scenario;
   if (scenario) sys.push(`Scenario: ${M(scenario)}`);
-  if (persona.description) sys.push(`About ${userName}: ${M(persona.description)}`);
+  if (persona.description) {
+    sys.push(`<user_persona name="${userName}">\nWhat others can see or reasonably know about ${userName} (characters may notice and react to this):\n${M(persona.description)}\n</user_persona>`);
+  }
+  if (persona.private) sys.push(personaPrivateBlock(userName, M(persona.private)));
   if (lore.after.length) sys.push(M(lore.after.join('\n')));
   if (speaker.mes_example) {
     const ex = M(speaker.mes_example).replace(/<START>/gi, '').trim();
@@ -140,6 +154,7 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
   const tail = [];
   const phi = speaker.post_history_instructions || settings.prompts.postHistory;
   if (phi) tail.push(M(phi));
+  if (persona.private) tail.push(`[Reminder: ${userName}'s private background is unknown to the characters. Nobody may mention, know or act on it, or claim ${userName} revealed it, unless it has actually come up in the chat.]`);
   if (mode === 'continue') tail.push('[Continue ' + speaker.name + "'s last message from exactly where it stopped. Do not repeat it.]");
   if (extraInstruction) tail.push(extraInstruction);
   if (isGroup) tail.push(`[Write the next reply only as ${speaker.name}.]`);
@@ -313,6 +328,7 @@ Compare the NEW REPLY against the established record: the character sheets, {{us
 - a character knows something they never learned or witnessed in the log
 - facts that conflict with the record: names, relationships, abilities, places, objects, injuries, clothing, time of day, who is present, what already happened
 - the reply decides {{user}}'s actions, words, thoughts or feelings
+- a character mentions, knows, hints at or acts on anything from {{user}}'s PRIVATE BACKGROUND that has not actually come up in the chat log, or claims {{user}} revealed, said or used it (the private background is out-of-character notes, not story)
 
 Do NOT flag: new details that fit with the record, style or quality issues, reasonable inferences, or events that could have happened off-screen without conflicting with anything.
 
@@ -340,7 +356,10 @@ export function buildContinuityCheck(chat, speaker, reply, { settings, character
     const sheet = [c.description, c.personality && `Personality: ${c.personality}`].filter(Boolean).join('\n');
     record.push(`### Character: ${c.name}\n${clip(macros(sheet, { ...ctx, char: c.name }), 2500)}`);
   }
-  record.push(`### ${userName} (the human's character)\n${clip(M(persona.description || '(no description)'), 1500)}`);
+  record.push(`### ${userName} (the human's character): public, visible to others\n${clip(M(persona.description || '(no description)'), 1500)}`);
+  if (persona.private) {
+    record.push(`### ${userName}: PRIVATE BACKGROUND (out-of-character notes; NOT known to the characters and NOT part of the story unless it appears in the chat log)\n${clip(M(persona.private), 1500)}`);
+  }
   const scenario = chat.scenario || speaker.scenario;
   if (scenario) record.push(`### Scenario\n${clip(M(scenario), 1200)}`);
   const lore = scanLorebooks(books, [...history, { role: 'char', name: speaker.name, swipes: [reply], swipeIdx: 0 }], nameOf);
@@ -389,4 +408,24 @@ export function parseContinuity(raw, reply) {
     .filter((x) => x && typeof x.quote === 'string' && typeof x.fix === 'string')
     .map((x) => ({ quote: x.quote.trim(), problem: String(x.problem || '').trim(), fix: x.fix.trim() }))
     .filter((x) => x.quote && x.quote !== x.fix && locateQuote(reply, x.quote));
+}
+
+// ---------- Persona splitting ----------
+
+export const PERSONA_SPLIT_PROMPT = `You sort a roleplay persona description into two sections.
+
+PUBLIC: what other characters could see, hear or reasonably know on meeting this person: name, apparent age, appearance, clothing, voice, body language, obvious gear, demeanor, public role or reputation.
+PRIVATE: what others would NOT know without being told or shown: secrets, hidden or unrevealed abilities and powers, past history, true motives, feelings and inner thoughts, relationships nobody has seen, anything the person is hiding.
+
+Keep the original wording as much as possible; only move sentences between sections (split a sentence if it mixes both). Do not add, invent or drop information.
+Respond with JSON only: {"public":"...","private":"..."}`;
+
+export function parsePersonaSplit(raw) {
+  const cleaned = String(raw).replace(/```(?:json)?/gi, '');
+  const a = cleaned.indexOf('{');
+  const b = cleaned.lastIndexOf('}');
+  if (a < 0 || b <= a) throw new Error("The model didn't return JSON");
+  const j = JSON.parse(cleaned.slice(a, b + 1));
+  if (typeof j.public !== 'string' || typeof j.private !== 'string') throw new Error("Couldn't read the model's answer");
+  return { public: j.public.trim(), private: j.private.trim() };
 }

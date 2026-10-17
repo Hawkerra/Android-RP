@@ -27,6 +27,10 @@ Everything is stored on the phone. There's no server and no account.
 
 **Personas**
 * Save as many personas as you want. Sort them into folders, and find them with the search bar.
+* Each persona has two sections:
+  * **Public:** appearance, voice, reputation, anything others could notice. Characters can react to it.
+  * **Private:** secrets, hidden abilities, history, inner thoughts. The AI gets this as out-of-character reference only. It's told the characters don't know it and that none of it has happened in the story until it comes up in the chat, and it's reminded of this right before every reply. The continuity check flags any reply that leaks it.
+  * **✨ Split with AI** sorts an existing mixed description into the two sections for you to review.
 * One persona is your default. Any chat can use a different one (⋮ → Switch persona, or Chat settings).
 * Import the personas saved on your Chub account (uses your Chub API key). They go into a "Chub" folder, and importing again updates them.
 * Import/export persona JSON, including SillyTavern persona backups.

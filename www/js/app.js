@@ -9,7 +9,7 @@ import {
 } from './cards.js';
 import {
   buildPrompt, generate, cleanReply, listModels, pickSpeakers, macros, estimateTokens,
-  buildContinuityCheck, parseContinuity, locateQuote,
+  buildContinuityCheck, parseContinuity, locateQuote, PERSONA_SPLIT_PROMPT, parsePersonaSplit,
 } from './engine.js';
 import { saveFile, onBack, isNative } from './native.js';
 import {
@@ -530,14 +530,14 @@ const settingsActs = {
 const folderList = () => [...new Set([...S.settings.personaFolders, ...Object.values(S.personas).map((p) => p.folder).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
 
 function personaMatches(p, q) {
-  return !q || [p.name, p.description, p.folder].join(' ').toLowerCase().includes(q);
+  return !q || [p.name, p.description, p.private, p.folder].join(' ').toLowerCase().includes(q);
 }
 
 function personaRows(list) {
   const def = defaultPersona().id;
   return list.map((p) => `<div class="row-item" data-act="openPersona" data-id="${p.id}">
     <img class="p-av" src="${personaAvatar(p)}" alt=""><div class="grow"><div class="ri-title">${esc(p.name)}${p.id === def ? '<span class="badge accent">default</span>' : ''}${p.source === 'chub' ? '<span class="badge">chub</span>' : ''}</div>
-    <div class="ri-sub">${esc(p.description.slice(0, 110)) || '<span class="muted">No description</span>'}</div></div>
+    <div class="ri-sub">${esc((p.description || p.private || '').slice(0, 110)) || '<span class="muted">No description</span>'}</div></div>
     <button class="icon-btn sm" data-act="personaMenu" data-id="${p.id}" aria-label="Options">${ICON.more}</button></div>`).join('');
 }
 
@@ -641,7 +641,7 @@ async function deletePersona(p) {
 }
 
 function exportPersonas() {
-  const data = { app: 'chatforge', kind: 'personas', personas: Object.values(S.personas).map(({ name, description, avatar, folder }) => ({ name, description, avatar, folder })) };
+  const data = { app: 'chatforge', kind: 'personas', personas: Object.values(S.personas).map(({ name, description, private: priv, avatar, folder }) => ({ name, description, private: priv, avatar, folder })) };
   saveFile('chatforge-personas.json', new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
 }
 
@@ -661,7 +661,7 @@ async function importPersonasFile() {
     if (!list.length) throw new Error('No personas found in that file');
     const folder = S.personaFolder === '*' ? '' : S.personaFolder;
     for (const x of list) {
-      await savePersona(newPersona({ name: String(x.name || 'Persona'), description: String(x.description || ''), avatar: x.avatar || '', folder: x.folder ?? folder }));
+      await savePersona(newPersona({ name: String(x.name || 'Persona'), description: String(x.description || ''), private: String(x.private || ''), avatar: x.avatar || '', folder: x.folder ?? folder }));
     }
     toast(`Imported ${list.length} persona${list.length > 1 ? 's' : ''}`);
     viewHome();
@@ -716,7 +716,11 @@ function viewPersonaEditor(p) {
       <label>Name<input class="input" data-bind="name"></label>
       <label>Folder<select class="input" id="folderSel">${folderOpts()}</select></label></div></div>
     <section class="panel">
-      <label>Description<span class="hint">Who you are in the roleplay: appearance, personality, background. Sent to the model as “About {{user}}”.</span><textarea class="input" rows="8" data-bind="description"></textarea></label>
+      <label><span class="sec-title">👁 Public: what others can see or know</span><span class="hint">Appearance, clothing, voice, mannerisms, obvious gear, reputation. Characters can notice and react to this.</span><textarea class="input" rows="6" data-bind="description"></textarea></label>
+      <label><span class="sec-title">🔒 Private: background for the AI only</span><span class="hint">Secrets, hidden abilities, history, true motives, inner thoughts. The AI uses this to play you consistently, but characters won't know any of it until it actually comes up in the chat.</span><textarea class="input" rows="6" data-bind="private"></textarea></label>
+      <div class="row wrap"><button class="btn sm" data-act="split">✨ Split with AI</button><span class="muted small grow">Sorts a mixed description into the two sections. You review it before anything changes.</span></div>
+    </section>
+    <section class="panel">
       <button class="btn ${isDefault() ? 'ghost' : ''}" data-act="makeDefault" ${isDefault() ? 'disabled' : ''}>${isDefault() ? '✓ Default persona' : 'Set as default persona'}</button>
     </section>
   </main>`;
@@ -739,12 +743,46 @@ function viewPersonaEditor(p) {
       p.avatar = await resizeImage(await readAsDataUrl(f), 512);
       await savePersona(p); $('.big-av').src = p.avatar;
     },
+    split: () => splitPersona(p, () => viewPersonaEditor(p)),
     makeDefault: () => { S.settings.activePersonaId = p.id; persistSettings.flush(); viewPersonaEditor(p); toast(`${p.name} is now your default persona`); },
     more: () => menu(p.name, [
       { label: 'Duplicate', run: async () => { const d = { ...structuredClone(p), id: uid(), name: p.name + ' (copy)', created: Date.now() }; await savePersona(d); go('/persona/' + d.id); } },
       { label: 'Delete persona', danger: true, run: () => deletePersona(p) },
     ]),
   });
+}
+
+/** Asks the model to sort a persona's text into public and private sections, then shows a preview. */
+async function splitPersona(p, done) {
+  const text = [p.description, p.private].filter((t) => t.trim()).join('\n\n');
+  if (!text.trim()) return toast('Write a description first');
+  const conn = activeConn();
+  if (!conn?.baseUrl) return toast('Set up an API connection in Settings first');
+  toast('Sorting the description…', 30000);
+  let result;
+  try {
+    const raw = await generate(conn, { ...S.settings.gen, temperature: 0.1, top_p: 1, min_p: 0, repetition_penalty: 1, frequency_penalty: 0, presence_penalty: 0, max_tokens: Math.max(800, estimateTokens(text) * 2 + 200), stream: false },
+      { messages: [{ role: 'system', content: PERSONA_SPLIT_PROMPT }, { role: 'user', content: `Persona name: ${p.name}\n\n${text}` }] });
+    result = parsePersonaSplit(raw);
+  } catch (e) { return toast(e instanceof TypeError ? "Couldn't reach the API" : e.message, 5000); }
+  toast('Review the split', 1500);
+  sheet(`<h3>Split “${esc(p.name)}”</h3>
+    <label><span class="sec-title">👁 Public</span><textarea class="input" rows="6" data-pub>${esc(result.public)}</textarea></label>
+    <label><span class="sec-title">🔒 Private</span><textarea class="input" rows="6" data-priv>${esc(result.private)}</textarea></label>
+    <p class="hint">Edit anything before saving. Nothing changes until you tap Use this.</p>
+    <div class="row end"><button class="btn ghost" data-x="0">Cancel</button><button class="btn primary" data-x="1">Use this</button></div>`,
+  (el, close) => el.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-x]');
+    if (!b) return;
+    if (b.dataset.x === '1') {
+      p.description = el.querySelector('[data-pub]').value.trim();
+      p.private = el.querySelector('[data-priv]').value.trim();
+      await savePersona(p);
+      toast('Persona split into public and private');
+      done();
+    }
+    close();
+  }));
 }
 
 /**
@@ -1234,7 +1272,8 @@ async function switchChatPersona(chat) {
   chat.personaId = id;
   await saveChat(chat);
   toast(`You are now ${personaFor(chat).name} in this chat`);
-  route();
+  // In the chat itself, refresh only the messages so the input box (and anything typed) survives.
+  if (location.hash === '#/chat/' + chat.id && $('#msgs')) renderMessages(chat); else route();
 }
 
 function renderMessages(chat) {

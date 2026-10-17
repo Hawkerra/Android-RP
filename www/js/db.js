@@ -131,7 +131,7 @@ export function newChat(over = {}) {
 }
 
 export function newPersona(over = {}) {
-  return { id: uid(), name: 'User', description: '', avatar: '', folder: '', source: 'local', created: Date.now(), updated: Date.now(), ...over };
+  return { id: uid(), name: 'User', description: '', private: '', avatar: '', folder: '', source: 'local', created: Date.now(), updated: Date.now(), ...over };
 }
 
 export function newMessage(over = {}) {
