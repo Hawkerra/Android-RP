@@ -299,3 +299,5 @@ button.pick:active { background: var(--bg3); }
 .k-ic { font-size: 18px; width: 24px; text-align: center; flex: none; }
 .entry-head .grow { white-space: normal; }
 .err-text { color: #ff9aa5; }
+.gen-row { margin: -4px 0 14px; gap: 10px; }
+.gen-out { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; max-height: 40dvh; overflow-y: auto; margin: 4px 0 6px; }

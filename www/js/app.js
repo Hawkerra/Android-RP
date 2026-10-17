@@ -848,6 +848,7 @@ function viewCharEditor(c) {
       ${field('personality', 'Personality summary', 2)}
       ${field('scenario', 'Scenario', 2)}
       ${field('first_mes', 'First message (greeting)', 4)}
+      <div class="row gen-row"><button class="btn sm" data-act="genGreet">✨ Generate greeting</button><span class="muted small">Writes one from this card. You review it first.</span></div>
       <div class="alt-greets"><div class="row between"><b>Alternate greetings</b><button class="btn ghost sm" data-act="addGreet">${ICON.plus} Add</button></div>
         ${c.alternate_greetings.map((g, i) => `<div class="alt"><textarea class="input" rows="3" data-bind="alternate_greetings.${i}"></textarea><button class="icon-btn sm" data-act="delGreet" data-i="${i}" aria-label="Remove">${ICON.trash}</button></div>`).join('')}</div>
       ${field('mes_example', 'Example dialogue', 4, 'Separate examples with <START>.')}
@@ -871,7 +872,13 @@ function viewCharEditor(c) {
   const main = $('#main');
   const updateTokens = () => { $('#tok').textContent = `≈ ${estimateTokens([c.description, c.personality, c.scenario, c.mes_example].join('\n'))} permanent tokens`; };
   updateTokens();
-  bindFields(main, c, (path) => { if (path === 'name') $('.top .title').textContent = c.name; save(); });
+  bindFields(main, c, (path) => {
+    if (path === 'name') {
+      $('.top .title').textContent = c.name;
+      if (!c.avatar) $('.big-av').src = avatarOf(c); // the placeholder shows the name's first letter
+    }
+    save();
+  });
   main.addEventListener('change', (e) => {
     if (e.target.hasAttribute('data-linkbook')) { c.lorebookIds = $$('[data-linkbook]:checked', main).map((x) => x.value); save(); }
   });
@@ -885,6 +892,7 @@ function viewCharEditor(c) {
       await saveChar(c); $('.big-av').src = c.avatar;
     },
     addGreet: () => { c.alternate_greetings.push(''); save.flush(); viewCharEditor(c); },
+    genGreet: () => { save.flush(); greetingGenerator(c, () => viewCharEditor(c)); },
     delGreet: (el) => { c.alternate_greetings.splice(+el.dataset.i, 1); save.flush(); viewCharEditor(c); },
     makeEmb: async () => { c.character_book = newLorebook({ name: `${c.name}'s Lorebook` }); await saveChar(c); go(`/lore/char:${c.id}`); },
     editEmb: () => { save.flush(); go(`/lore/char:${c.id}`); },
@@ -906,6 +914,92 @@ function viewCharEditor(c) {
       } },
     ]),
   });
+}
+
+/**
+ * Writes a greeting for character c from its card, with optional guidance, in a preview sheet
+ * where it can be regenerated before being used as the first message or an alternate greeting.
+ */
+function greetingGenerator(c, done) {
+  const conn = activeConn();
+  if (!conn?.baseUrl) return toast('Set up an API connection in Settings first');
+  if (![c.description, c.personality, c.scenario].some((t) => t.trim())) return toast('Fill in the description first so there is something to write from');
+  const results = [];
+  let idx = -1;
+  let abort = null;
+
+  // Cards are shared, so greetings refer to the player as {{user}} rather than a persona's name.
+  const generateOne = async (el, guidance) => {
+    const tmpChat = { id: 'greeting', characterIds: [c.id], mutedIds: [], lorebookIds: [], messages: [], scenario: '', world: '', story: '', tracker: null, authorNote: '' };
+    const books = [...(c.character_book?.entries.length ? [c.character_book] : []), ...c.lorebookIds.map((id) => S.books[id]).filter(Boolean)];
+    const prompt = buildPrompt(tmpChat, c, {
+      settings: { ...S.settings, persona: { name: '{{user}}', description: '', private: '' } },
+      characters: { [c.id]: c }, books, history: [],
+      extraInstruction: openingInstruction(c.name, '{{user}}') + '\n[Refer to the other person only as {{user}}; this greeting will be reused with different people.]',
+      direction: guidance,
+    });
+    abort = new AbortController();
+    results.push(''); idx = results.length - 1;
+    render(el, true);
+    const out = el.querySelector('[data-out]');
+    try {
+      const raw = await generate(conn, { ...S.settings.gen, max_tokens: Math.max(S.settings.gen.max_tokens, 500) }, prompt, {
+        signal: abort.signal,
+        onToken: (t) => { results[idx] = cleanReply(t, c.name, prompt.otherNames); out.innerHTML = fmt(results[idx]); out.scrollTop = out.scrollHeight; },
+      });
+      results[idx] = cleanReply(raw, c.name, prompt.otherNames);
+      if (!results[idx].trim()) throw new Error('The model returned an empty greeting');
+    } catch (e) {
+      results.splice(idx, 1); idx = results.length - 1;
+      if (e.name !== 'AbortError') toast(e instanceof TypeError ? "Couldn't reach the API" : e.message, 5000);
+    }
+    abort = null;
+    render(el, false);
+  };
+
+  const render = (el, busy) => {
+    const has = idx >= 0;
+    el.querySelector('[data-preview]').innerHTML = has ? `
+      <div class="gen-out text" data-out>${fmt(results[idx]) || '<span class="typing"><i></i><i></i><i></i></span>'}</div>
+      <div class="row between"><div class="swipes"><button class="icon-btn xs" data-nav="-1" ${idx <= 0 || busy ? 'disabled' : ''} aria-label="Previous">${ICON.left}</button><span>${idx + 1}/${results.length}</span><button class="icon-btn xs" data-nav="1" ${idx >= results.length - 1 || busy ? 'disabled' : ''} aria-label="Next">${ICON.right}</button></div>
+        ${busy ? '<button class="btn ghost sm" data-x="stop">Stop</button>' : ''}</div>` : '';
+    el.querySelector('[data-actions]').innerHTML = busy ? '' : has
+      ? `<button class="btn" data-x="gen">↻ Regenerate</button><button class="btn" data-x="alt">Add as alternate</button><button class="btn primary" data-x="first">Use as first message</button>`
+      : `<button class="btn ghost" data-x="close">Cancel</button><button class="btn primary" data-x="gen">Generate</button>`;
+  };
+
+  sheet(`<h3>✨ Generate a greeting for ${esc(c.name)}</h3>
+    <label>How should it open? <span class="hint">Optional: where and when, what's happening, the mood. Leave empty to let the AI choose from the card.</span>
+      <textarea class="input" rows="3" data-g placeholder="e.g. {{char}} finds {{user}} hiding in the ship's cargo hold">${esc(c.greetingGuidance || '')}</textarea></label>
+    <div data-preview></div>
+    <div class="row wrap end" data-actions></div>`,
+  (el, close) => {
+    render(el, false);
+    el.addEventListener('click', async (e) => {
+      const nav = e.target.closest('[data-nav]');
+      if (nav) { idx = Math.min(results.length - 1, Math.max(0, idx + +nav.dataset.nav)); render(el, false); return; }
+      const b = e.target.closest('[data-x]');
+      if (!b) return;
+      const g = el.querySelector('[data-g]').value.trim();
+      switch (b.dataset.x) {
+        case 'gen':
+          c.greetingGuidance = g;
+          await generateOne(el, g);
+          break;
+        case 'stop': abort?.abort(); break;
+        case 'close': close(); break;
+        case 'first':
+          if (c.first_mes.trim()) c.alternate_greetings.unshift(c.first_mes);
+          c.first_mes = results[idx];
+          await saveChar(c); close(); toast(c.alternate_greetings.length ? 'Set as first message (the old one is now an alternate greeting)' : 'Set as first message'); done();
+          break;
+        case 'alt':
+          c.alternate_greetings.push(results[idx]);
+          await saveChar(c); close(); toast('Added as an alternate greeting'); done();
+          break;
+      }
+    });
+  }).then(() => abort?.abort());
 }
 
 const safeName = (s) => s.replace(/[^\w-]+/g, '_').slice(0, 40) || 'export';

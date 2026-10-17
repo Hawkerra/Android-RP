@@ -39,6 +39,12 @@ Everything is stored on the phone. There's no server and no account.
 
 **Bot browser:** searches Chub and Botbooru together, mixing their results (tap a site chip to turn it on or off). Search by name and filter by tags. Chub tags are free-form, so you can type any tag. Tags found in the current results are suggested, most common first. You can also tap a tag on any bot to search with it.
 
+**Greeting generator:** in the character editor, **✨ Generate greeting** writes an opening from the card.
+* You can give optional guidance (where and when, what's happening).
+* Regenerate, and flip back through earlier attempts.
+* Then **Use as first message** (the old one moves to the alternate greetings) or **Add as alternate**.
+* Greetings refer to the player as `{{user}}`, so the card stays reusable.
+
 **Lorebooks**
 * Kinds: standalone books, books embedded in a character, and global books that are active in every chat.
 * Entry settings:
