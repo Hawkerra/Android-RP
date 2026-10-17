@@ -82,6 +82,7 @@ export function defaultSettings() {
     globalLorebookIds: [],
     showNsfw: false,
     browseSources: ['chub', 'botbooru'],
+    continuity: { mode: 'auto', connectionId: '', model: '' },
     botbooruUrl: 'https://botbooru.com',
   };
 }
@@ -93,7 +94,7 @@ export async function loadSettings() {
   const s = await db.get('kv', 'settings');
   if (!s) { def.activeConnectionId = def.connections[0].id; await db.put('kv', def); return def; }
   // shallow-merge new defaults into older saves
-  return { ...def, ...s, gen: { ...def.gen, ...s.gen }, prompts: { ...def.prompts, ...s.prompts }, persona: { ...def.persona, ...s.persona }, chatBg: { ...def.chatBg, ...s.chatBg } };
+  return { ...def, ...s, gen: { ...def.gen, ...s.gen }, prompts: { ...def.prompts, ...s.prompts }, persona: { ...def.persona, ...s.persona }, chatBg: { ...def.chatBg, ...s.chatBg }, continuity: { ...def.continuity, ...s.continuity } };
 }
 
 export const saveSettings = (s) => db.put('kv', s);

@@ -264,3 +264,17 @@ button.pick:active { background: var(--bg3); }
 .card .src { float: right; font-size: 11px; opacity: .8; }
 .tagbtn { border: 0; font: inherit; font-size: 12px; padding: 4px 9px; cursor: pointer; }
 #srcRow { padding-top: 0; align-items: center; } #srcRow .muted { flex: none; }
+
+/* ---------- continuity check ---------- */
+.cc { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 12.5px; border-radius: 8px; padding: 3px 8px; border: 0; background: none; }
+.cc.ok { color: #6fcf97; opacity: .75; padding-left: 0; }
+.cc.running { color: var(--muted); padding-left: 0; }
+.cc.warn { background: rgb(242 194 123 / .14); color: var(--quote); font-weight: 600; cursor: pointer; }
+.cc.err { background: rgb(239 93 108 / .12); color: #ff9aa5; cursor: pointer; }
+.cc-mark { background: rgb(242 194 123 / .22); color: inherit; border-bottom: 2px wavy var(--quote); border-radius: 2px; text-decoration: none; }
+.spin-sm { width: 12px; height: 12px; border: 2px solid var(--bg3); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+.cc-issue { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin-bottom: 10px; background: var(--bg); }
+.cc-problem { margin: 0 0 8px; }
+.cc-diff { display: grid; gap: 6px; font-size: 14px; }
+.cc-diff del { background: rgb(239 93 108 / .12); color: #ffb3bb; padding: 6px 8px; border-radius: 8px; }
+.cc-diff ins { background: rgb(111 207 151 / .12); color: #a8ebc4; padding: 6px 8px; border-radius: 8px; text-decoration: none; }

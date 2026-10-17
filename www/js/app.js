@@ -7,7 +7,10 @@ import {
   chubImportCharacter, chubImportLorebook, parseChubRef, browseSearch, importBrowseResult, BOT_SOURCES,
   chubListPersonas, chubPersonaAvatar,
 } from './cards.js';
-import { buildPrompt, generate, cleanReply, listModels, pickSpeakers, macros, estimateTokens } from './engine.js';
+import {
+  buildPrompt, generate, cleanReply, listModels, pickSpeakers, macros, estimateTokens,
+  buildContinuityCheck, parseContinuity, locateQuote,
+} from './engine.js';
 import { saveFile, onBack, isNative } from './native.js';
 import {
   $, $$, esc, fmt, timeAgo, toast, sheet, menu, confirmBox, promptBox, pickFile, readAsDataUrl,
@@ -388,6 +391,17 @@ function homeSettings() {
     <label class="check"><input type="checkbox" data-bind="chatBg.enabled"> Show the character's image behind the chat</label>
     ${num('chatBg.blur', 'Blur', 0, 40, 1)}
     ${num('chatBg.dim', 'Darken', 0, 0.9, 0.05)}</section>
+
+  <section class="panel"><h2>Continuity check</h2>
+    <p class="hint">After each reply, a second request checks it against the chat so far and flags contradictions, like the bot claiming you did or said something you never did, with a suggested fix.</p>
+    <label>When to check<select class="input" data-bind="continuity.mode">
+      <option value="auto">Automatically after every reply</option>
+      <option value="manual">Only when I ask (message menu → Check continuity)</option>
+      <option value="off">Off</option></select></label>
+    <label>Connection for checks<select class="input" data-bind="continuity.connectionId">
+      <option value="">Same as chat</option>${s.connections.map((c) => `<option value="${c.id}">${esc(c.name || c.baseUrl)}</option>`).join('')}</select></label>
+    <label>Model override<input class="input" data-bind="continuity.model" placeholder="Leave empty to use the connection's model" autocapitalize="off" spellcheck="false"></label>
+  </section>
 
   <section class="panel"><h2>Prompts</h2>
     <p class="hint">Macros: {{char}}, {{user}}, {{members}}, {{time}}, {{date}}, {{random:a,b,c}}, {{roll:2d6}}</p>
@@ -1094,16 +1108,38 @@ function msgHtml(chat, m, idx) {
   const av = m.role === 'user' ? personaAvatar(msgPersona(m, chat)) : m.role === 'narrator' ? '' : avatarOf(c || { name: m.name });
   const showSwipes = m.role === 'char' && (m.swipes.length > 1 || isLast);
   const editing = S.editingMsg === m.id;
+  const chk = m.role === 'char' && m.check && m.check.text === msgText(m) ? m.check : null;
   return `<div class="msg ${m.role}" data-mid="${m.id}">
     ${av ? `<img class="av" src="${av}" alt="">` : ''}
     <div class="bubble" data-act="msgMenu" data-id="${m.id}">
       <div class="meta"><span class="name">${esc(nameOf(m, chat))}</span></div>
       ${editing
         ? `<textarea class="input edit-ta">${esc(msgText(m))}</textarea><div class="row end"><button class="btn ghost sm" data-act="editCancel">Cancel</button><button class="btn primary sm" data-act="editSave" data-id="${m.id}">Save</button></div>`
-        : `<div class="text">${fmt(msgText(m)) || '<span class="typing"><i></i><i></i><i></i></span>'}</div>`}
+        : `<div class="text">${(chk?.status === 'issues' ? fmtMarked(msgText(m), chk.issues) : fmt(msgText(m))) || '<span class="typing"><i></i><i></i><i></i></span>'}</div>${chk && !editing ? checkBadge(m, chk) : ''}`}
       ${showSwipes && !editing ? `<div class="swipes"><button class="icon-btn xs" data-act="swipeL" data-id="${m.id}" ${m.swipeIdx === 0 ? 'disabled' : ''} aria-label="Previous">${ICON.left}</button>
         <span>${m.swipeIdx + 1}/${m.swipes.length}</span><button class="icon-btn xs" data-act="swipeR" data-id="${m.id}" ${!isLast && m.swipeIdx >= m.swipes.length - 1 ? 'disabled' : ''} aria-label="Next or regenerate">${ICON.right}</button></div>` : ''}
     </div></div>`;
+}
+
+/** Formats text with the continuity checker's flagged spans highlighted. */
+function fmtMarked(text, issues) {
+  const ranges = issues.map((i) => locateQuote(text, i.quote)).filter(Boolean).sort((a, b) => a[0] - b[0]);
+  let out = '';
+  let pos = 0;
+  for (const [a, b] of ranges) {
+    if (a < pos) continue; // overlapping flags: keep the first
+    out += text.slice(pos, a) + '\u0001' + text.slice(a, b) + '\u0002';
+    pos = b;
+  }
+  out += text.slice(pos);
+  return fmt(out).replace(/\u0001/g, '<mark class="cc-mark">').replace(/\u0002/g, '</mark>');
+}
+
+function checkBadge(m, chk) {
+  if (chk.status === 'running') return '<div class="cc running"><span class="spin-sm"></span>Checking continuity…</div>';
+  if (chk.status === 'issues') return `<button class="cc warn" data-act="ccReview" data-id="${m.id}">⚠ ${chk.issues.length} continuity issue${chk.issues.length > 1 ? 's' : ''} · Review</button>`;
+  if (chk.status === 'error') return `<button class="cc err" data-act="ccCheck" data-id="${m.id}" title="${esc(chk.error)}">Continuity check failed · Retry</button>`;
+  return `<div class="cc ok">✓ ${chk.fixed ? 'Fixed' : 'Consistent'}</div>`;
 }
 
 function viewChat(chat) {
@@ -1153,6 +1189,8 @@ function viewChat(chat) {
       if (!S.abort) regenerate(chat, m);
     },
     msgMenu: (el, e) => { if (e.target.closest('.swipes, .edit-ta, button')) return; msgMenu(chat, findMsg(el.dataset.id)); },
+    ccReview: (el, e) => { e.stopPropagation(); reviewContinuity(chat, findMsg(el.dataset.id)); },
+    ccCheck: (el, e) => { e.stopPropagation(); checkContinuity(chat, findMsg(el.dataset.id)); },
     editCancel: (el, e) => { e.stopPropagation(); S.editingMsg = null; renderMessages(chat); },
     editSave: (el, e) => {
       e.stopPropagation();
@@ -1236,6 +1274,7 @@ function msgMenu(chat, m) {
     { label: 'Copy text', run: () => { navigator.clipboard?.writeText(msgText(m)).then(() => toast('Copied'), () => toast('Copy failed')); } },
     isLastChar && { label: 'Regenerate (new swipe)', run: () => !S.abort && regenerate(chat, m) },
     isLastChar && { label: 'Continue this message', run: () => !S.abort && continueMsg(chat, m) },
+    m.role === 'char' && { label: 'Check continuity', run: () => checkContinuity(chat, m) },
     { label: 'Branch from here (new chat)', run: async () => {
       const c = { ...structuredClone(chat), id: uid(), title: chatTitle(chat) + ' (branch)', messages: structuredClone(chat.messages.slice(0, idx + 1)), created: Date.now() };
       await saveChat(c); go('/chat/' + c.id);
@@ -1301,6 +1340,7 @@ async function runTurns(chat, speakers) {
       renderMessages(chat); scrollToBottom(true);
       const ok = await generateInto(chat, m, sp, 'reply');
       if (!ok) break;
+      autoCheck(chat, m);
     }
   } finally {
     S.abort = null; S.genChatId = null;
@@ -1310,34 +1350,38 @@ async function runTurns(chat, speakers) {
   }
 }
 
-async function regenerate(chat, m) {
+async function regenerate(chat, m, extraInstruction = '') {
   const sp = S.chars[m.charId];
   if (!sp) return toast('That character was deleted');
   m.swipes.push(''); m.swipeIdx = m.swipes.length - 1;
   rerenderMsg(chat, m);
   S.abort = new AbortController(); S.genChatId = chat.id; setSendButton(chat);
-  try { await generateInto(chat, m, sp, 'reply'); } finally {
+  let ok = false;
+  try { ok = await generateInto(chat, m, sp, 'reply', extraInstruction); } finally {
     S.abort = null; S.genChatId = null; setSendButton(chat); await saveChat(chat); renderMessages(chat);
   }
+  if (ok) autoCheck(chat, m);
 }
 
 async function continueMsg(chat, m) {
   const sp = S.chars[m.charId];
   if (!sp) return;
   S.abort = new AbortController(); S.genChatId = chat.id; setSendButton(chat);
-  try { await generateInto(chat, m, sp, 'continue'); } finally {
+  let ok = false;
+  try { ok = await generateInto(chat, m, sp, 'continue'); } finally {
     S.abort = null; S.genChatId = null; setSendButton(chat); await saveChat(chat); renderMessages(chat);
   }
+  if (ok) autoCheck(chat, m);
 }
 
 /** Fills message m (current swipe) with a generation. Returns false on error/abort. */
-async function generateInto(chat, m, speaker, mode) {
+async function generateInto(chat, m, speaker, mode, extraInstruction = '') {
   const conn = activeConn();
   if (!conn?.baseUrl) { toast('Set up an API connection in Settings first'); dropEmpty(chat, m); return false; }
   const idx = chat.messages.indexOf(m);
   const history = mode === 'continue' ? chat.messages.slice(0, idx + 1) : chat.messages.slice(0, idx);
   const base = mode === 'continue' ? msgText(m) : '';
-  const prompt = buildPrompt(chat, speaker, { settings: { ...S.settings, persona: personaFor(chat) }, characters: S.chars, books: booksFor(chat), history, mode });
+  const prompt = buildPrompt(chat, speaker, { settings: { ...S.settings, persona: personaFor(chat) }, characters: S.chars, books: booksFor(chat), history, mode, extraInstruction });
   S.lastPrompt = { ...prompt, speaker: speaker.name, at: Date.now() };
 
   const join = (t) => (mode === 'continue' ? base + (base && t && !/^[\s,.!?;:'")\]]/.test(t) && !/\s$/.test(base) ? ' ' : '') + t : t);
@@ -1358,6 +1402,95 @@ async function generateInto(chat, m, speaker, mode) {
     dropEmpty(chat, m);
     return false;
   }
+}
+
+// ---------- continuity check ----------
+
+function autoCheck(chat, m) {
+  if (S.settings.continuity.mode === 'auto') checkContinuity(chat, m, { quiet: true });
+}
+
+const showIfVisible = (chat, m) => { if (location.hash === '#/chat/' + chat.id && S.editingMsg !== m.id) rerenderMsg(chat, m); };
+
+/** Asks the model to compare message m against the story so far; stores the result on m.check. */
+async function checkContinuity(chat, m, { quiet = false } = {}) {
+  const speaker = S.chars[m.charId];
+  const text = msgText(m);
+  if (!speaker || !text.trim() || m.check?.status === 'running' && m.check.text === text) return;
+  const cc = S.settings.continuity;
+  const base = S.settings.connections.find((c) => c.id === cc.connectionId) || activeConn();
+  if (!base?.baseUrl) return quiet || toast('Set up an API connection in Settings first');
+  const conn = cc.model ? { ...base, model: cc.model } : base;
+  m.check = { text, status: 'running', issues: [] };
+  showIfVisible(chat, m);
+  try {
+    const messages = buildContinuityCheck(chat, speaker, text, {
+      settings: { ...S.settings, persona: personaFor(chat) }, characters: S.chars, books: booksFor(chat),
+      history: chat.messages.slice(0, chat.messages.indexOf(m)),
+    });
+    const gen = { ...S.settings.gen, temperature: 0.2, top_p: 1, min_p: 0, repetition_penalty: 1, frequency_penalty: 0, presence_penalty: 0, max_tokens: 1000, stream: false };
+    const raw = await generate(conn, gen, { messages });
+    if (msgText(m) !== text) return; // edited while we were checking
+    const issues = parseContinuity(raw, text);
+    m.check = { text, status: issues.length ? 'issues' : 'ok', issues };
+  } catch (e) {
+    if (msgText(m) !== text) return;
+    m.check = { text, status: 'error', error: e.message, issues: [] };
+    if (!quiet) toast('Continuity check: ' + e.message, 5000);
+  }
+  await saveChat(chat);
+  showIfVisible(chat, m);
+}
+
+function applyContinuityFix(m, issue) {
+  const text = msgText(m);
+  const loc = locateQuote(text, issue.quote);
+  if (!loc) return false;
+  const next = text.slice(0, loc[0]) + issue.fix + text.slice(loc[1]);
+  m.swipes[m.swipeIdx] = next;
+  const rest = m.check.issues.filter((i) => i !== issue && locateQuote(next, i.quote));
+  m.check = { text: next, status: rest.length ? 'issues' : 'ok', issues: rest, fixed: true };
+  return true;
+}
+
+function reviewContinuity(chat, m) {
+  const isLast = chat.messages[chat.messages.length - 1] === m;
+  sheet('<div id="ccBody"></div>', (el, close) => {
+    const body = el.querySelector('#ccBody');
+    const render = () => {
+      const issues = m.check?.status === 'issues' && m.check.text === msgText(m) ? m.check.issues : [];
+      if (!issues.length) { close(); return; }
+      body.innerHTML = `<h3>Continuity check — ${esc(m.name)}</h3>
+        ${issues.map((it, i) => `<div class="cc-issue">
+          <p class="cc-problem">${esc(it.problem || 'Contradicts the story so far.')}</p>
+          <div class="cc-diff"><del>${esc(it.quote)}</del><ins>${esc(it.fix) || '<i>(remove)</i>'}</ins></div>
+          <div class="row end"><button class="btn ghost sm" data-ignore="${i}">Ignore</button><button class="btn primary sm" data-apply="${i}">Apply fix</button></div></div>`).join('')}
+        <div class="row wrap end">${isLast && !S.abort ? '<button class="btn sm" data-x="rewrite">Rewrite reply instead</button>' : ''}${issues.length > 1 ? '<button class="btn primary sm" data-x="all">Apply all</button>' : ''}</div>`;
+    };
+    const commit = () => { saveChat(chat); showIfVisible(chat, m); render(); };
+    body.addEventListener('click', (e) => {
+      const t = e.target.closest('button');
+      if (!t) return;
+      const issues = m.check.issues;
+      if (t.dataset.apply) {
+        if (!applyContinuityFix(m, issues[+t.dataset.apply])) toast("That text has changed — edit the message instead");
+        commit();
+      } else if (t.dataset.ignore) {
+        const rest = issues.filter((_, i) => i !== +t.dataset.ignore);
+        m.check = { ...m.check, issues: rest, status: rest.length ? 'issues' : 'ok', fixed: true };
+        commit();
+      } else if (t.dataset.x === 'all') {
+        [...issues].forEach((it) => applyContinuityFix(m, it));
+        commit();
+        toast('Fixes applied');
+      } else if (t.dataset.x === 'rewrite') {
+        const notes = issues.map((it) => `- ${it.problem || it.quote}`).join('\n');
+        close();
+        regenerate(chat, m, `[Continuity notes: a previous draft of this reply contradicted the story. Avoid these mistakes and stay consistent with what has actually happened:\n${notes}]`);
+      }
+    });
+    render();
+  });
 }
 
 /** Removes an empty swipe / message left by a failed generation. */

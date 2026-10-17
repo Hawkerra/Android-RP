@@ -96,7 +96,7 @@ export function scanLorebooks(books, messages, nameFn) {
  * Builds an OpenAI chat-completions messages array for `speaker` replying in `chat`.
  * opts: { settings, characters (map id->char), lorebooks (array of book objects), mode: 'reply'|'continue' }
  */
-export function buildPrompt(chat, speaker, { settings, characters, books, history, mode = 'reply' }) {
+export function buildPrompt(chat, speaker, { settings, characters, books, history, mode = 'reply', extraInstruction = '' }) {
   const persona = settings.persona;
   const userName = persona.name || 'User';
   const members = chat.characterIds.map((id) => characters[id]).filter(Boolean);
@@ -141,6 +141,7 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
   const phi = speaker.post_history_instructions || settings.prompts.postHistory;
   if (phi) tail.push(M(phi));
   if (mode === 'continue') tail.push('[Continue ' + speaker.name + "'s last message from exactly where it stopped. Do not repeat it.]");
+  if (extraInstruction) tail.push(extraInstruction);
   if (isGroup) tail.push(`[Write the next reply only as ${speaker.name}.]`);
 
   // --- History within the context budget ---
@@ -301,4 +302,91 @@ export function pickSpeakers(chat, characters, lastText, userName) {
   if (pool.length) return [pool[Math.floor(Math.random() * pool.length)]];
   const others = active.filter((c) => c.id !== lastSpeakerId);
   return [(others.length ? others : active)[Math.floor(Math.random() * (others.length || active.length))]];
+}
+
+// ---------- Continuity check ----------
+
+export const CONTINUITY_PROMPT = `You are a meticulous continuity editor for a collaborative roleplay between {{user}} (played by a human) and AI-written characters.
+
+Compare the NEW REPLY against the established record: the character sheets, {{user}}'s persona, the lore, and the chat log. Flag only clear contradictions, such as:
+- the reply claims someone (especially {{user}}) said, did, revealed, used or agreed to something that the chat log does not show
+- a character knows something they never learned or witnessed in the log
+- facts that conflict with the record: names, relationships, abilities, places, objects, injuries, clothing, time of day, who is present, what already happened
+- the reply decides {{user}}'s actions, words, thoughts or feelings
+
+Do NOT flag: new details that fit with the record, style or quality issues, reasonable inferences, or events that could have happened off-screen without conflicting with anything.
+
+For each issue:
+- "quote": the exact, shortest span copied verbatim from the NEW REPLY that contains the error
+- "problem": one short sentence explaining what contradicts the record
+- "fix": replacement text for that span that removes the contradiction, keeps the same voice, tense and flow, fits what has actually happened, and reads naturally when dropped in place of the quote
+
+Respond with JSON only, no other text:
+{"issues":[{"quote":"...","problem":"...","fix":"..."}]}
+If the reply is consistent, respond {"issues":[]}.`;
+
+/** Builds the messages for checking `reply` (spoken by `speaker`) against `history`. */
+export function buildContinuityCheck(chat, speaker, reply, { settings, characters, books, history }) {
+  const persona = settings.persona;
+  const userName = persona.name || 'User';
+  const members = chat.characterIds.map((id) => characters[id]).filter(Boolean);
+  const ctx = { char: speaker.name, user: userName, members: members.map((m) => m.name).join(', ') };
+  const M = (t) => macros(t, ctx);
+  const nameOf = (m) => (m.role === 'user' ? userName : m.role === 'narrator' ? 'Narrator' : m.name || characters[m.charId]?.name || 'Character');
+  const clip = (t, n) => (t.length > n ? t.slice(0, n) + '…' : t);
+
+  const record = [];
+  for (const c of members) {
+    const sheet = [c.description, c.personality && `Personality: ${c.personality}`].filter(Boolean).join('\n');
+    record.push(`### Character: ${c.name}\n${clip(macros(sheet, { ...ctx, char: c.name }), 2500)}`);
+  }
+  record.push(`### ${userName} (the human's character)\n${clip(M(persona.description || '(no description)'), 1500)}`);
+  const scenario = chat.scenario || speaker.scenario;
+  if (scenario) record.push(`### Scenario\n${clip(M(scenario), 1200)}`);
+  const lore = scanLorebooks(books, [...history, { role: 'char', name: speaker.name, swipes: [reply], swipeIdx: 0 }], nameOf);
+  if (lore.activated.length) record.push(`### Lore\n${clip(M(lore.activated.map((e) => e.content).join('\n')), 2500)}`);
+  const header = record.join('\n\n');
+
+  // Fit as much of the log as the context allows, newest first.
+  let budget = settings.gen.context_size - 900 - estimateTokens(header) - estimateTokens(reply) - estimateTokens(CONTINUITY_PROMPT);
+  const lines = [];
+  for (let i = history.length - 1; i >= 0; i--) {
+    const line = `${nameOf(history[i])}: ${msgText(history[i])}`;
+    const t = estimateTokens(line) + 2;
+    if (t > budget) { lines.unshift('[…earlier messages omitted…]'); break; }
+    budget -= t;
+    lines.unshift(line);
+  }
+
+  return [
+    { role: 'system', content: M(CONTINUITY_PROMPT) },
+    { role: 'user', content: `## ESTABLISHED RECORD\n\n${header}\n\n## CHAT LOG (oldest first)\n\n${lines.join('\n\n') || '(no earlier messages)'}\n\n## NEW REPLY by ${speaker.name}\n\n${reply}\n\nList the continuity issues in the NEW REPLY as JSON.` },
+  ];
+}
+
+/** Finds `quote` in `text`, tolerating whitespace, case and quote-mark differences. Returns [start, end] or null. */
+export function locateQuote(text, quote) {
+  if (!quote) return null;
+  const i = text.indexOf(quote);
+  if (i >= 0) return [i, i + quote.length];
+  const words = quote.trim().split(/\s+/).map((w) => escapeRe(w).replace(/["“”]/g, '["“”]').replace(/['‘’]/g, "['‘’]"));
+  if (!words.length) return null;
+  const m = new RegExp(words.join('[\\s*_]+'), 'i').exec(text);
+  return m ? [m.index, m.index + m[0].length] : null;
+}
+
+/** Parses the checker's answer; keeps only issues whose quote is actually in the reply. */
+export function parseContinuity(raw, reply) {
+  const cleaned = String(raw).replace(/```(?:json)?/gi, '');
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start < 0 || end <= start) throw new Error("The checker didn't return JSON");
+  let j;
+  try { j = JSON.parse(cleaned.slice(start, end + 1)); } catch { throw new Error("Couldn't read the checker's answer"); }
+  const list = Array.isArray(j) ? j : j.issues;
+  if (!Array.isArray(list)) throw new Error("Couldn't read the checker's answer");
+  return list
+    .filter((x) => x && typeof x.quote === 'string' && typeof x.fix === 'string')
+    .map((x) => ({ quote: x.quote.trim(), problem: String(x.problem || '').trim(), fix: x.fix.trim() }))
+    .filter((x) => x.quote && x.quote !== x.fix && locateQuote(reply, x.quote));
 }

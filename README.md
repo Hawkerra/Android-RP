@@ -59,6 +59,20 @@ In every mode, tap a character's chip above the message box to make them speak n
 * Narrator messages: `/n A storm rolls in.`
 * **⋮ → View last prompt** shows exactly what was sent to the model and which lore entries fired.
 
+**Continuity check**
+* After each bot reply, a second request compares it against the chat log, character sheets, your persona and active lore. It flags contradictions, for example:
+  * the bot says you did or revealed something you never did
+  * a character knows something they never learned
+  * facts change (names, places, injuries, who's present)
+  * the bot writes your character's actions
+* Flagged wording is highlighted in the message. **Review** shows each problem with a suggested drop-in fix:
+  * **Apply fix** (or **Apply all**) swaps in the suggested text
+  * **Ignore** dismisses that issue
+  * **Rewrite reply instead** regenerates the reply with the problems spelled out to the model
+* Settings → Continuity check:
+  * run it automatically, only on demand (message menu → Check continuity), or never
+  * optionally use a different connection or a cheaper model for checks
+
 **Macros:** `{{char}}`, `{{user}}`, `{{members}}`, `{{time}}`, `{{date}}`, `{{random:a,b,c}}`, `{{roll:2d6}}`.
 
 **Backup:** Settings → Data → Export/Import backup. The backup file includes your API keys.
