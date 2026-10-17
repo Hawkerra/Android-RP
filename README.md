@@ -28,11 +28,12 @@ Everything is stored on the phone. There's no server and no account.
 **Personas**
 * Save as many personas as you want. Sort them into folders, and find them with the search bar.
 * One persona is your default. Any chat can use a different one (⋮ → Switch persona, or Chat settings).
+* Import the personas saved on your Chub account (uses your Chub API key). They go into a "Chub" folder, and importing again updates them.
 * Import/export persona JSON, including SillyTavern persona backups.
 
 **Chat background:** the bot's image fills the chat background, zoomed in, blurred and darkened. In group chats it fades to whoever spoke last. Turn it off or change the blur and darkness in Settings → Chat background.
 
-**Bot browser:** search by name and filter by tags. Add tags to include or exclude, or tap a tag on any bot to search with it.
+**Bot browser:** search by name and filter by tags. Chub tags are free-form, so you can type any tag. Tags found in the current results are suggested, most common first. You can also tap a tag on any bot to search with it.
 
 **Lorebooks**
 * Kinds: standalone books, books embedded in a character, and global books that are active in every chat.

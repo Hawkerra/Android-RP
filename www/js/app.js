@@ -5,6 +5,7 @@ import {
 import {
   importFile, exportCharacterPng, characterToCard, lorebookToJson, lorebookFromJson, blankAvatar, resizeImage,
   chubImportCharacter, chubImportLorebook, parseChubRef, browseSearch, importBrowseResult, BOT_SOURCES,
+  chubListPersonas, chubPersonaAvatar,
 } from './cards.js';
 import { buildPrompt, generate, cleanReply, listModels, pickSpeakers, macros, estimateTokens } from './engine.js';
 import { saveFile, onBack, isNative } from './native.js';
@@ -649,6 +650,31 @@ async function importPersonasFile() {
   } catch (e) { toast(e.message, 4000); }
 }
 
+/** Pulls the personas saved on the user's Chub account. Re-running updates them in place. */
+async function importChubPersonas() {
+  toast('Fetching your Chub personas…', 15000);
+  let list;
+  try { list = await chubListPersonas(chubKey()); } catch (e) { return toast(chubError(e), 6000); }
+  if (!list.length) return toast('No personas found on your Chub account');
+  const byChubId = new Map(Object.values(S.personas).filter((p) => p.chubId != null).map((p) => [String(p.chubId), p]));
+  let added = 0; let updated = 0;
+  for (const cp of list) {
+    toast(`Importing ${cp.name}… (${added + updated + 1}/${list.length})`, 15000);
+    const existing = byChubId.get(String(cp.chubId));
+    const avatar = await chubPersonaAvatar(cp.avatar);
+    if (existing) {
+      Object.assign(existing, { name: cp.name, description: cp.description, ...(avatar ? { avatar } : {}) });
+      await savePersona(existing); updated++;
+    } else {
+      await savePersona(newPersona({ name: cp.name, description: cp.description, avatar, folder: 'Chub', source: 'chub', chubId: cp.chubId }));
+      added++;
+    }
+  }
+  if (!S.settings.personaFolders.includes('Chub')) { S.settings.personaFolders.push('Chub'); persistSettings.flush(); }
+  toast(`Chub personas: ${added} added${updated ? `, ${updated} updated` : ''}`, 4000);
+  viewHome();
+}
+
 const personaActs = {
   openPersona: (el, e) => { if (!e.target.closest('[data-act=personaMenu]')) go('/persona/' + el.dataset.id); },
   personaMenu: (el, e) => { e.stopPropagation(); personaMenu(S.personas[el.dataset.id]); },
@@ -656,6 +682,7 @@ const personaActs = {
   newFolder: async () => { const n = await newFolderPrompt(); if (n) { S.personaFolder = n; viewHome(); } },
   folders: manageFolders,
   importPersona: () => menu('Personas', [
+    { label: 'Import from my Chub account', run: importChubPersonas },
     { label: 'Import from file (JSON)', run: importPersonasFile },
     { label: 'Export all personas', run: exportPersonas },
   ]),
@@ -979,10 +1006,20 @@ function viewChub() {
     url: () => chubUrlImport(),
     dropTag: (el) => { C.tags = tagsOf(C.tags).filter((t) => t !== el.dataset.tag).join(','); renderTags(); search(); },
     dropEx: (el) => { C.excludeTags = tagsOf(C.excludeTags).filter((t) => t !== el.dataset.tag).join(','); renderTags(); search(); },
-    addTag: () => sheet(`<h3>Filter by tag</h3><input class="input" data-t placeholder="Type a tag, e.g. fantasy" autocapitalize="off">
+    addTag: () => {
+      // Chub tags are free-form, so suggest the ones actually used by the bots on screen.
+      const counts = new Map();
+      for (const r of C.results) for (const t of r.tags) { const k = t.trim(); if (k) counts.set(k, (counts.get(k) || 0) + 1); }
+      const active = new Set([...tagsOf(C.tags), ...tagsOf(C.excludeTags)].map((t) => t.toLowerCase()));
+      const seen = [...counts].sort((a, b) => b[1] - a[1]).map(([t]) => t).filter((t) => !active.has(t.toLowerCase())).slice(0, 40);
+      const popular = SUGGESTED_TAGS.filter((t) => !active.has(t.toLowerCase()) && !seen.some((x) => x.toLowerCase() === t.toLowerCase()));
+      const chips = (list) => `<div class="chips wrap flush">${list.map((t) => `<button class="chip" data-sug="${esc(t)}">${esc(t)}</button>`).join('')}</div>`;
+      return sheet(`<h3>Filter by tag</h3><input class="input" data-t placeholder="Any tag — Chub tags are free-form" autocapitalize="off" list="tagSuggest">
+      <datalist id="tagSuggest">${[...counts.keys()].map((t) => `<option value="${esc(t)}">`).join('')}</datalist>
       <div class="row"><button class="btn primary grow" data-mode="inc">Include</button><button class="btn grow" data-mode="exc">Exclude</button></div>
-      <p class="hint">Popular tags — tap to include, long-press to exclude:</p>
-      <div class="chips wrap flush">${SUGGESTED_TAGS.map((t) => `<button class="chip" data-sug="${esc(t)}">${esc(t)}</button>`).join('')}</div>`,
+      <p class="hint">Tap a tag to include it, long-press to exclude it.</p>
+      ${seen.length ? `<p class="hint"><b>In these results</b></p>${chips(seen)}` : ''}
+      <p class="hint"><b>Common tags</b></p>${chips(popular)}`,
     (el, close) => {
       const inp = el.querySelector('[data-t]');
       setTimeout(() => inp.focus(), 50);
@@ -1004,7 +1041,8 @@ function viewChub() {
         const b = e.target.closest('[data-sug]');
         if (b && !longPressed) done(b.dataset.sug, false);
       });
-    }),
+    });
+    },
     preview: (el) => {
       const r = C.results[+el.dataset.i];
       sheet(`<div class="preview"><img src="${esc(r.avatar)}" alt="" referrerpolicy="no-referrer"><div><h3>${esc(r.name)}</h3><p class="muted small">by ${esc(r.creator || r.path?.split('/')[0] || 'unknown')} · ★ ${r.stars} · ${esc(BOT_SOURCES[r.source]?.label || r.source)}</p></div></div>

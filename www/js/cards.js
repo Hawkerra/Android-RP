@@ -378,3 +378,40 @@ export async function browseSearch(opts, enabled = Object.keys(BOT_SOURCES)) {
 }
 
 export const importBrowseResult = (r, opts) => BOT_SOURCES[r.source].importResult(r, opts);
+
+// ---------- Chub account: personas ----------
+// gateway.chub.ai is undocumented; endpoint and field names match what the Echo-RP
+// project verified against a live account.
+
+const CHUB_GATEWAY = 'https://gateway.chub.ai';
+
+/** Lists the personas saved on the Chub account that owns `key`. */
+export async function chubListPersonas(key) {
+  if (!key) throw new Error('Add your Chub API key in Settings first');
+  const r = await request(`${CHUB_GATEWAY}/api/personas`, { headers: chubHeaders(key) });
+  if (!r.ok) {
+    const detail = await r.text().catch(() => '');
+    throw new Error(`Chub returned ${r.status} for personas${r.status === 401 || r.status === 403 ? ' (check your API key)' : ''}${detail ? ': ' + detail.slice(0, 120) : ''}`);
+  }
+  const body = await r.json();
+  return (body?.personas ?? []).map((p) => ({
+    chubId: p.id,
+    name: p.persona_name || p.name || 'Persona',
+    description: p.chat_profile ?? '',
+    avatar: p.avatar ?? '',
+    isDefault: !!p.is_default,
+  }));
+}
+
+/** Best-effort persona picture download; returns a data URL or ''. */
+export async function chubPersonaAvatar(avatar) {
+  if (!avatar) return '';
+  const url = /^https?:/i.test(avatar) ? avatar : `https://avatars.charhub.io/avatars/${String(avatar).replace(/^\/+/, '')}`;
+  try {
+    const r = await request(url, { binary: true });
+    if (!r.ok) return '';
+    const buf = await r.arrayBuffer();
+    if (!buf.byteLength) return '';
+    return await resizeImage(await bufferToDataUrl(buf, 'image/webp'), 512);
+  } catch { return ''; }
+}

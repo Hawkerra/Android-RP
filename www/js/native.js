@@ -38,8 +38,10 @@ export async function request(url, { method = 'GET', headers = {}, body, signal,
   if (!Http) throw new Error('Native HTTP unavailable');
   let data = body;
   if (typeof body === 'string') { try { data = JSON.parse(body); } catch { /* keep string */ } }
+  // Chub sits behind a firewall that rejects empty or bot-like User-Agents.
+  const h = { 'User-Agent': 'ChatForge/1.0 (Android)', ...headersToObj(headers) };
   const p = Http.request({
-    url, method, headers: headersToObj(headers), data,
+    url, method, headers: h, data,
     responseType: binary ? 'arraybuffer' : 'text', connectTimeout: 30000, readTimeout: 300000,
   });
   const res = await (signal ? Promise.race([p, new Promise((_, rej) => signal.addEventListener('abort', () => rej(new DOMException('Aborted', 'AbortError'))))]) : p);
