@@ -244,11 +244,12 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
   const messages = [{ role: 'system', content: system }, ...hist];
   // With no history yet (an opening post), some APIs reject a prompt that has no user turn.
   if (!hist.some((h) => h.role === 'user' || h.role === 'assistant')) messages.push({ role: 'user', content: '[Begin the story.]' });
+  // If the last thing said wasn't the player's (an empty send, or the next speaker in a group round),
+  // add a hidden out-of-character note so the model continues instead of waiting for input.
+  // It is never stored or shown in the chat.
+  const lastSaid = [...history].reverse().find((m) => msgText(m).trim());
+  if (mode !== 'continue' && lastSaid && lastSaid.role !== 'user') messages.push({ role: 'user', content: M(settings.prompts.continueNudge) });
   if (tail.length) messages.push({ role: 'system', content: tail.join('\n') });
-  // Many backends require the conversation to end on a user turn.
-  if (messages[messages.length - 1].role === 'assistant' && mode !== 'continue') {
-    messages.push({ role: 'user', content: settings.prompts.continueNudge });
-  }
 
   const stop = [`\n${userName}:`, ...members.filter((m) => m.id !== speaker.id).map((m) => `\n${m.name}:`)].slice(0, 4);
   return { messages, stop, lore: lore.activated, otherNames: [userName, ...members.filter((m) => m.id !== speaker.id).map((m) => m.name)] };

@@ -61,7 +61,7 @@ export const DEFAULT_PROMPTS = {
   main: "Write {{char}}'s next reply in a fictional roleplay between {{char}} and {{user}}. Stay in character, be descriptive and proactive, and never write dialogue or actions for {{user}}.",
   group: "This is a group roleplay with several characters: {{members}}. Write only {{char}}'s next reply. Do not write for {{user}} or the other characters.",
   postHistory: '',
-  continueNudge: '[Continue the scene naturally from where it left off.]',
+  continueNudge: "[OOC: {{user}} has nothing to add this turn. Continue the scene naturally from where it left off, without writing {{user}}'s actions, words or thoughts.]",
 };
 
 export function defaultSettings() {
@@ -96,6 +96,8 @@ export async function loadSettings() {
   const s = await db.get('kv', 'settings');
   if (!s) { def.activeConnectionId = def.connections[0].id; await db.put('kv', def); return def; }
   // shallow-merge new defaults into older saves
+  // upgrade the old default continue note to the OOC wording (custom text is left alone)
+  if (s.prompts?.continueNudge === '[Continue the scene naturally from where it left off.]') delete s.prompts.continueNudge;
   return { ...def, ...s, gen: { ...def.gen, ...s.gen }, prompts: { ...def.prompts, ...s.prompts }, persona: { ...def.persona, ...s.persona }, chatBg: { ...def.chatBg, ...s.chatBg }, continuity: { ...def.continuity, ...s.continuity },
     // older saves kept the helper model under continuity
     helper: { ...def.helper, connectionId: s.continuity?.connectionId || '', model: s.continuity?.model || '', ...s.helper },

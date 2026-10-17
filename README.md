@@ -73,6 +73,8 @@ Both are sent to the bot as the frame for the story. The continuity check and sc
 * Regenerating a directed reply reuses its direction.
 * The continuity check knows about it, so things you directed aren't flagged.
 
+**Empty send = continue:** tapping send with an empty box sends nothing visible. The bot gets a hidden out-of-character note saying you have nothing to add this turn and to carry the scene on without writing your actions. This also works in Manual group mode. The wording is editable in Settings → Prompts.
+
 **Opening post:** the first message has no story to continue from, so rewriting it asks how the scene should open. This happens when you swipe past the last greeting, choose "Rewrite opening…", or start a chat whose character has no greeting by tapping send with an empty box.
 * The box is pre-filled with your Director note, or with what you used last time.
 * **Surprise me** lets the AI choose.

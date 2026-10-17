@@ -433,7 +433,7 @@ function homeSettings() {
     <label>Main system prompt<textarea class="input" rows="4" data-bind="prompts.main"></textarea></label>
     <label>Group chat instruction<textarea class="input" rows="3" data-bind="prompts.group"></textarea></label>
     <label>Post-history instruction (jailbreak / style)<textarea class="input" rows="2" data-bind="prompts.postHistory"></textarea></label>
-    <label>Nudge when nobody has spoken<textarea class="input" rows="2" data-bind="prompts.continueNudge"></textarea></label>
+    <label>Hidden "continue" note<span class="hint">Sent invisibly when you send an empty message (or the next character in a group takes a turn), so the bot carries on without input from you. Never shown in the chat.</span><textarea class="input" rows="3" data-bind="prompts.continueNudge"></textarea></label>
     <button class="btn ghost sm" data-act="resetPrompts">Reset prompts to default</button></section>
 
   <section class="panel"><h2>Chub</h2>
@@ -1419,7 +1419,9 @@ async function sendMessage(chat, forceSpeakerId = null) {
   let speakers;
   if (forceSpeakerId) speakers = [S.chars[forceSpeakerId]];
   else {
-    speakers = pickSpeakers(chat, S.chars, text, personaFor(chat).name);
+    // An empty send means "carry on": in manual group mode, let the scene pick who continues.
+    const pickChat = !text && chat.groupMode === 'manual' ? { ...chat, groupMode: 'natural' } : chat;
+    speakers = pickSpeakers(pickChat, S.chars, text, personaFor(chat).name);
     if (!speakers.length) {
       if (chat.characterIds.length > 1 && chat.groupMode === 'manual') return toast('Tap a character above the input to choose who replies');
       if (!chat.characterIds.length) return toast('This chat has no characters — add some in chat settings');
