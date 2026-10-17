@@ -263,3 +263,4 @@ button.pick:active { background: var(--bg3); }
 .chip.ex { background: color-mix(in srgb, var(--danger) 20%, transparent); border-color: color-mix(in srgb, var(--danger) 50%, transparent); color: #ffb3bb; }
 .card .src { float: right; font-size: 11px; opacity: .8; }
 .tagbtn { border: 0; font: inherit; font-size: 12px; padding: 4px 9px; cursor: pointer; }
+#srcRow { padding-top: 0; align-items: center; } #srcRow .muted { flex: none; }

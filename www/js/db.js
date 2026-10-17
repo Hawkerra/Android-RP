@@ -81,6 +81,8 @@ export function defaultSettings() {
     prompts: { ...DEFAULT_PROMPTS },
     globalLorebookIds: [],
     showNsfw: false,
+    browseSources: ['chub', 'botbooru'],
+    botbooruUrl: 'https://botbooru.com',
   };
 }
 

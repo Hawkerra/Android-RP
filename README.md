@@ -33,7 +33,7 @@ Everything is stored on the phone. There's no server and no account.
 
 **Chat background:** the bot's image fills the chat background, zoomed in, blurred and darkened. In group chats it fades to whoever spoke last. Turn it off or change the blur and darkness in Settings → Chat background.
 
-**Bot browser:** search by name and filter by tags. Chub tags are free-form, so you can type any tag. Tags found in the current results are suggested, most common first. You can also tap a tag on any bot to search with it.
+**Bot browser:** searches Chub and Botbooru together, mixing their results (tap a site chip to turn it on or off). Search by name and filter by tags. Chub tags are free-form, so you can type any tag. Tags found in the current results are suggested, most common first. You can also tap a tag on any bot to search with it.
 
 **Lorebooks**
 * Kinds: standalone books, books embedded in a character, and global books that are active in every chat.
@@ -81,6 +81,7 @@ Desktop browsers block most API calls from a web page (CORS). The Android app se
 | `www/js/app.js` | Screens, chat flow, group turn-taking |
 | `www/js/engine.js` | Prompt building, lorebook scanning, API client |
 | `www/js/cards.js` | Card/lorebook import & export, Chub search/import |
+| `www/js/booru.js` | Botbooru (or any booru-style site) search & card import |
 | `www/js/db.js` | IndexedDB storage, defaults, data models |
 | `www/js/native.js` | Android bridges (native HTTP, file saving, back button) |
 

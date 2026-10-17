@@ -30,7 +30,7 @@ const S = {
   lastPrompt: null,
   openEntries: new Set(),
   editingMsg: null,
-  chub: { query: '', tags: '', excludeTags: '', sort: 'download_count', page: 1, results: [], loading: false, done: false },
+  chub: { warned: new Set(), query: '', tags: '', excludeTags: '', sort: 'download_count', page: 1, results: [], loading: false, done: false },
 };
 
 // ---------- persistence helpers ----------
@@ -400,6 +400,10 @@ function homeSettings() {
   <section class="panel"><h2>Chub</h2>
     <label>Chub API key for browsing / importing<input class="input" type="password" data-bind="chubApiKey" placeholder="Leave empty to reuse your Chub connection key" autocomplete="off"></label>
     <label class="check"><input type="checkbox" data-bind="showNsfw"> Show NSFW results when browsing</label></section>
+
+  <section class="panel"><h2>Botbooru</h2>
+    <label>Site address<input class="input" data-bind="botbooruUrl" inputmode="url" autocapitalize="off" spellcheck="false"></label>
+    <p class="hint">Searched alongside Chub in the bot browser. Works with any booru-style site (Danbooru, Gelbooru, Moebooru, Szurubooru or Philomena software).</p></section>
 
   <section class="panel"><h2>Global lorebooks</h2><p class="hint">Active in every chat.</p>
     ${books.length ? books.map((b) => `<label class="check"><input type="checkbox" data-globalbook value="${b.id}" ${s.globalLorebookIds.includes(b.id) ? 'checked' : ''}> ${esc(b.name)}</label>`).join('') : '<p class="muted">No lorebooks yet.</p>'}</section>
@@ -952,6 +956,7 @@ function viewChub() {
     const inc = tagsOf(C.tags).map((t) => `<button class="chip on" data-act="dropTag" data-tag="${esc(t)}">${esc(t)}<span class="x">✕</span></button>`);
     const exc = tagsOf(C.excludeTags).map((t) => `<button class="chip ex" data-act="dropEx" data-tag="${esc(t)}">−${esc(t)}<span class="x">✕</span></button>`);
     $('#tagRow').innerHTML = `${inc.join('')}${exc.join('')}<button class="chip add" data-act="addTag">${ICON.tag} Tag</button>`;
+    $('#srcRow').innerHTML = `<span class="muted small">Sites:</span>${Object.entries(BOT_SOURCES).map(([id, src]) => `<button class="chip ${S.settings.browseSources.includes(id) ? 'on' : ''}" data-act="toggleSrc" data-src="${id}">${esc(src.label)}</button>`).join('')}`;
   };
   const renderResults = () => {
     $('#results').innerHTML = C.results.map((r, i) => `<div class="card" data-act="preview" data-i="${i}"><img src="${esc(r.avatar)}" loading="lazy" alt="" referrerpolicy="no-referrer">
@@ -967,13 +972,13 @@ function viewChub() {
     renderResults();
     const { results, errors, done } = await browseSearch({
       query: C.query, tags: tagsOf(C.tags), excludeTags: tagsOf(C.excludeTags), page: C.page,
-      sort: C.sort, nsfw: S.settings.showNsfw, key: chubKey(),
-    });
+      sort: C.sort, nsfw: S.settings.showNsfw, key: chubKey(), botbooruUrl: S.settings.botbooruUrl,
+    }, S.settings.browseSources);
     const have = new Set(C.results.map((r) => r.id));
     C.results.push(...results.filter((r) => !have.has(r.id)));
     C.done = done;
     C.page++;
-    errors.forEach((e) => toast(`${BOT_SOURCES[e.source].label}: ${chubError(e.error)}`, 5000));
+    errors.filter((e) => !C.warned.has(e.source)).forEach((e) => C.warned.add(e.source) && toast(`${BOT_SOURCES[e.source].label}: ${e.error instanceof TypeError ? "couldn't reach the site" : e.error.message}`, 6000));
     C.loading = false;
     renderResults();
   };
@@ -990,6 +995,7 @@ function viewChub() {
   <main class="scroll pad-bottom" id="main">
     <div class="row pad"><input class="input grow" id="q" type="search" placeholder="Search characters…" value="${esc(C.query)}" enterkeyhint="search">
       <select class="input narrow" id="sort"><option value="download_count">Popular</option><option value="star_count">Stars</option><option value="created_at">Newest</option><option value="last_activity_at">Updated</option></select></div>
+    <div class="chips" id="srcRow"></div>
     <div class="chips wrap" id="tagRow"></div>
     <div class="grid" id="results"></div>
     <div class="center pad"><div class="spinner" id="spin"></div><button class="btn" id="more" data-act="more">Load more</button></div>
@@ -1004,6 +1010,13 @@ function viewChub() {
   handleActs({
     more: () => search(true),
     url: () => chubUrlImport(),
+    toggleSrc: (el) => {
+      const id = el.dataset.src;
+      const on = S.settings.browseSources;
+      if (on.includes(id) && on.length === 1) return toast('Keep at least one site selected');
+      S.settings.browseSources = on.includes(id) ? on.filter((x) => x !== id) : [...on, id];
+      persistSettings.flush(); renderTags(); search();
+    },
     dropTag: (el) => { C.tags = tagsOf(C.tags).filter((t) => t !== el.dataset.tag).join(','); renderTags(); search(); },
     dropEx: (el) => { C.excludeTags = tagsOf(C.excludeTags).filter((t) => t !== el.dataset.tag).join(','); renderTags(); search(); },
     addTag: () => {
