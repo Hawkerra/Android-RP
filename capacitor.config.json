@@ -1,0 +1,11 @@
+{
+  "appId": "com.chatforge.app",
+  "appName": "ChatForge",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": true
+  },
+  "plugins": {
+    "CapacitorHttp": { "enabled": false }
+  }
+}
