@@ -275,16 +275,21 @@ export function parseChubRef(input) {
   return { type: 'characters', path: s.replace(/^characters\//i, '') };
 }
 
-export async function chubSearch({ query = '', page = 1, nsfw = false, sort = 'download_count', key = '' } = {}) {
+const tagParam = (t) => (Array.isArray(t) ? t : String(t || '').split(',')).map((x) => x.trim()).filter(Boolean).join(',');
+
+export async function chubSearch({ query = '', tags = [], excludeTags = [], page = 1, nsfw = false, sort = 'download_count', key = '' } = {}) {
   const p = new URLSearchParams({
     search: query, first: '24', page: String(page), sort, asc: 'false', nsfw: String(nsfw),
     nsfl: String(nsfw), include_forks: 'true', venus: 'false', chub: 'true',
   });
+  if (tagParam(tags)) p.set('tags', tagParam(tags));
+  if (tagParam(excludeTags)) p.set('exclude_tags', tagParam(excludeTags));
   const r = await request(`${CHUB_API}/search?${p}`, { headers: chubHeaders(key) });
   if (!r.ok) throw new Error(`Chub search failed (${r.status})`);
   const j = await r.json();
   const nodes = j?.data?.nodes || j?.nodes || [];
   return nodes.map((n) => ({
+    source: 'chub', id: 'chub:' + n.fullPath,
     path: n.fullPath, name: n.name, tagline: n.tagline || '', stars: n.starCount || 0,
     downloads: n.nChats || n.downloadCount || 0, tags: n.topics || [],
     avatar: n.avatar_url || `https://avatars.charhub.io/avatars/${n.fullPath}/avatar.webp`,
@@ -337,3 +342,39 @@ export async function chubImportLorebook(path, key = '') {
   const raw = def.embedded_lorebook || (def.extensions && def.extensions.lorebook) || def;
   return lorebookFromJson({ ...raw, name: raw.name || node.name, description: raw.description || node.tagline }, node.name);
 }
+
+// ---------- Multi-site bot browsing ----------
+
+/**
+ * Sites searched by the bot browser. Each returns results shaped like chubSearch()
+ * (source, id, name, tagline, avatar, tags, stars) and can import one of them.
+ */
+export const BOT_SOURCES = {
+  chub: {
+    label: 'Chub',
+    search: (opts) => chubSearch(opts),
+    importResult: (r, opts) => chubImportCharacter(r.path, opts.key),
+  },
+};
+
+/** Searches every enabled source in parallel and interleaves the results. */
+export async function browseSearch(opts, enabled = Object.keys(BOT_SOURCES)) {
+  const ids = enabled.filter((id) => BOT_SOURCES[id]);
+  const settled = await Promise.allSettled(ids.map((id) => BOT_SOURCES[id].search(opts)));
+  const lists = settled.map((r) => (r.status === 'fulfilled' ? r.value : []));
+  const errors = settled.map((r, i) => (r.status === 'rejected' ? { source: ids[i], error: r.reason } : null)).filter(Boolean);
+  const merged = [];
+  const seen = new Set();
+  for (let i = 0; i < Math.max(0, ...lists.map((l) => l.length)); i++) {
+    for (const l of lists) {
+      const r = l[i];
+      const key = r && `${r.name.toLowerCase()}|${(r.tagline || '').slice(0, 40).toLowerCase()}`;
+      if (r && !seen.has(key)) { seen.add(key); merged.push(r); }
+    }
+  }
+  // a source is "done" when it returned less than a full page
+  const done = lists.every((l) => l.length < 24);
+  return { results: merged, errors, done };
+}
+
+export const importBrowseResult = (r, opts) => BOT_SOURCES[r.source].importResult(r, opts);

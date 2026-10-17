@@ -1,10 +1,10 @@
 import {
-  db, uid, loadSettings, saveSettings, newCharacter, newLorebook, newEntry, newChat, newMessage, msgText,
+  db, uid, loadSettings, saveSettings, newCharacter, newLorebook, newEntry, newChat, newMessage, newPersona, msgText,
   CHUB_PRESETS, DEFAULT_PROMPTS,
 } from './db.js';
 import {
   importFile, exportCharacterPng, characterToCard, lorebookToJson, lorebookFromJson, blankAvatar, resizeImage,
-  chubSearch, chubImportCharacter, chubImportLorebook, parseChubRef,
+  chubImportCharacter, chubImportLorebook, parseChubRef, browseSearch, importBrowseResult, BOT_SOURCES,
 } from './cards.js';
 import { buildPrompt, generate, cleanReply, listModels, pickSpeakers, macros, estimateTokens } from './engine.js';
 import { saveFile, onBack, isNative } from './native.js';
@@ -20,13 +20,16 @@ const S = {
   chars: {},
   books: {},
   chats: {},
+  personas: {},
   homeTab: 'chats',
+  personaQuery: '',
+  personaFolder: '*',   // '*' = all, '' = unfiled, otherwise a folder name
   abort: null,          // AbortController while generating
   genChatId: null,
   lastPrompt: null,
   openEntries: new Set(),
   editingMsg: null,
-  chub: { query: '', sort: 'download_count', page: 1, results: [], loading: false, done: false },
+  chub: { query: '', tags: '', excludeTags: '', sort: 'download_count', page: 1, results: [], loading: false, done: false },
 };
 
 // ---------- persistence helpers ----------
@@ -35,11 +38,15 @@ const touch = (o) => { o.updated = Date.now(); return o; };
 const saveChar = (c) => { S.chars[c.id] = touch(c); return db.put('characters', c); };
 const saveBook = (b) => { S.books[b.id] = touch(b); return db.put('lorebooks', b); };
 const saveChat = (c) => { S.chats[c.id] = touch(c); return db.put('chats', c); };
+const savePersona = (p) => { S.personas[p.id] = touch(p); return db.put('personas', p); };
 const persistSettings = debounce(() => saveSettings(S.settings), 300);
 
 const sortByUpdated = (o) => Object.values(o).sort((a, b) => b.updated - a.updated);
 const avatarOf = (c) => c?.avatar || blankAvatar(c?.name || '?');
-const userAvatar = () => S.settings.persona.avatar || blankAvatar(S.settings.persona.name || 'U');
+const defaultPersona = () => S.personas[S.settings.activePersonaId] || sortByUpdated(S.personas)[0] || newPersona();
+/** The persona the user plays in a chat (chat override, else the default). */
+const personaFor = (chat) => S.personas[chat?.personaId] || defaultPersona();
+const personaAvatar = (p) => p?.avatar || blankAvatar(p?.name || 'U');
 const activeConn = () => S.settings.connections.find((c) => c.id === S.settings.activeConnectionId) || S.settings.connections[0];
 
 function getPath(obj, path) { return path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj); }
@@ -80,20 +87,24 @@ function bindFields(root, obj, onChange) {
 
 // ---------- routing ----------
 
+const HOME_TABS = ['chats', 'characters', 'personas', 'lorebooks', 'settings'];
+
 const go = (h) => { location.hash = h; };
 const parts = () => location.hash.replace(/^#\/?/, '').split('/').map(decodeURIComponent);
 
 function route() {
   const [view, id, sub] = parts();
   app.onclick = null;
+  app.className = '';
   window.scrollTo(0, 0);
   switch (view) {
     case 'chat': return S.chats[id] ? (sub === 'settings' ? viewChatSettings(S.chats[id]) : viewChat(S.chats[id])) : go('');
     case 'char': return S.chars[id] ? viewCharEditor(S.chars[id]) : go('');
     case 'lore': return viewLoreEditor(id);
     case 'chub': return viewChub();
+    case 'persona': return S.personas[id] ? viewPersonaEditor(S.personas[id]) : go('/personas');
     default:
-      if (['chats', 'characters', 'lorebooks', 'settings'].includes(view)) S.homeTab = view;
+      if (HOME_TABS.includes(view)) S.homeTab = view;
       return viewHome();
   }
 }
@@ -119,33 +130,36 @@ function handleActs(map) {
 
 function viewHome() {
   const tab = S.homeTab;
-  const titles = { chats: 'Chats', characters: 'Characters', lorebooks: 'Lorebooks', settings: 'Settings' };
+  const titles = { chats: 'Chats', characters: 'Characters', personas: 'Personas', lorebooks: 'Lorebooks', settings: 'Settings' };
   const actions = {
     chats: '',
-    characters: `<button class="icon-btn" data-act="chub" aria-label="Browse Chub">${ICON.search}</button><button class="icon-btn" data-act="importChar" aria-label="Import">${ICON.upload}</button>`,
+    characters: `<button class="icon-btn" data-act="chub" aria-label="Browse bots">${ICON.search}</button><button class="icon-btn" data-act="importChar" aria-label="Import">${ICON.upload}</button>`,
     lorebooks: `<button class="icon-btn" data-act="importBook" aria-label="Import">${ICON.upload}</button>`,
+    personas: `<button class="icon-btn" data-act="folders" aria-label="Folders">${ICON.folder}</button><button class="icon-btn" data-act="importPersona" aria-label="Import">${ICON.upload}</button>`,
     settings: '',
   }[tab];
-  const body = { chats: homeChats, characters: homeChars, lorebooks: homeBooks, settings: homeSettings }[tab]();
+  const body = { chats: homeChats, characters: homeChars, personas: homePersonas, lorebooks: homeBooks, settings: homeSettings }[tab]();
   const tabBtn = (t, icon) => `<button class="tab ${tab === t ? 'on' : ''}" data-act="tab" data-tab="${t}">${icon}<span>${titles[t]}</span></button>`;
   app.innerHTML = `${header({ title: titles[tab], back: false, actions })}
     <main class="scroll pad-bottom" id="main">${body}</main>
     ${tab !== 'settings' ? `<button class="fab" data-act="new" aria-label="New">${ICON.plus}</button>` : ''}
-    <nav class="tabs">${tabBtn('chats', ICON.chat)}${tabBtn('characters', ICON.people)}${tabBtn('lorebooks', ICON.book)}${tabBtn('settings', ICON.gear)}</nav>`;
+    <nav class="tabs">${tabBtn('chats', ICON.chat)}${tabBtn('characters', ICON.people)}${tabBtn('personas', ICON.mask)}${tabBtn('lorebooks', ICON.book)}${tabBtn('settings', ICON.gear)}</nav>`;
 
   handleActs({
     tab: (el) => go('/' + el.dataset.tab),
     chub: () => go('/chub'),
-    new: () => ({ chats: newChatFlow, characters: createCharacter, lorebooks: createBook })[tab](),
+    new: () => ({ chats: newChatFlow, characters: createCharacter, personas: createPersona, lorebooks: createBook })[tab](),
     openChat: (el) => go('/chat/' + el.dataset.id),
     chatMenu: (el, e) => { e.stopPropagation(); chatMenu(S.chats[el.dataset.id]); },
     openChar: (el) => go('/char/' + el.dataset.id),
     openBook: (el) => go('/lore/' + el.dataset.id),
     importChar: importCharMenu,
     importBook: importBookMenu,
+    ...personaActs,
     ...settingsActs,
   });
   if (tab === 'settings') wireSettings();
+  if (tab === 'personas') wirePersonas();
 }
 
 function avStack(ids) {
@@ -223,9 +237,9 @@ function pickCharacters(title, exclude = [], okLabel = 'Start chat') {
   });
 }
 
-function greetingMessage(c) {
+function greetingMessage(c, userName = defaultPersona().name) {
   if (!c.first_mes && !c.alternate_greetings.length) return null;
-  const ctx = { char: c.name, user: S.settings.persona.name };
+  const ctx = { char: c.name, user: userName };
   const swipes = [c.first_mes, ...c.alternate_greetings].filter(Boolean).map((t) => macros(t, ctx));
   return newMessage({ role: 'char', charId: c.id, name: c.name, swipes });
 }
@@ -258,7 +272,7 @@ function exportChat(chat) {
   const out = {
     title: chatTitle(chat), created: chat.created,
     characters: chat.characterIds.map((id) => S.chars[id]?.name),
-    messages: chat.messages.map((m) => ({ name: m.role === 'user' ? S.settings.persona.name : m.name || 'Narrator', role: m.role, text: msgText(m), time: m.time })),
+    messages: chat.messages.map((m) => ({ name: nameOf(m, chat), role: m.role, text: msgText(m), time: m.time })),
   };
   saveFile(`${chatTitle(chat).replace(/[^\w-]+/g, '_').slice(0, 40)}.json`, new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' }));
 }
@@ -293,7 +307,7 @@ function importCharMenu() {
   menu('Import character', [
     { label: 'From file (PNG card or JSON)', run: async () => importFiles(await pickFile('.png,.json,image/png,application/json', true)) },
     { label: 'From Chub URL', run: () => chubUrlImport() },
-    { label: 'Browse Chub', run: () => go('/chub') },
+    { label: 'Browse bots online', run: () => go('/chub') },
   ]);
 }
 
@@ -364,9 +378,15 @@ function homeSettings() {
     ${num('gen.presence_penalty', 'Presence penalty', -2, 2, 0.05)}
     <label class="check"><input type="checkbox" data-bind="gen.stream"> Stream responses</label></section>
 
-  <section class="panel"><h2>Your persona</h2>
-    <div class="row"><img class="persona-av" data-act="personaAv" src="${userAvatar()}" alt="Your avatar"><label class="grow">Name<input class="input" data-bind="persona.name"></label></div>
-    <label>Description (who you are in the RP)<textarea class="input" rows="3" data-bind="persona.description"></textarea></label></section>
+  <section class="panel"><h2>Default persona</h2>
+    <div class="row"><img class="persona-av" src="${personaAvatar(defaultPersona())}" alt=""><div class="grow"><b>${esc(defaultPersona().name)}</b>
+      <div class="muted small">Used in new chats. Each chat can pick its own persona.</div></div>
+      <button class="btn sm" data-act="tab" data-tab="personas">Manage</button></div></section>
+
+  <section class="panel"><h2>Chat background</h2>
+    <label class="check"><input type="checkbox" data-bind="chatBg.enabled"> Show the character's image behind the chat</label>
+    ${num('chatBg.blur', 'Blur', 0, 40, 1)}
+    ${num('chatBg.dim', 'Darken', 0, 0.9, 0.05)}</section>
 
   <section class="panel"><h2>Prompts</h2>
     <p class="hint">Macros: {{char}}, {{user}}, {{members}}, {{time}}, {{date}}, {{random:a,b,c}}, {{roll:2d6}}</p>
@@ -453,18 +473,12 @@ const settingsActs = {
     } catch (e) { toast(e instanceof TypeError ? 'Network error (CORS or unreachable host)' : e.message, 5000); }
     el.disabled = false; el.textContent = 'Test';
   },
-  personaAv: async () => {
-    const f = await pickFile('image/*');
-    if (!f) return;
-    S.settings.persona.avatar = await resizeImage(await readAsDataUrl(f), 256);
-    persistSettings.flush(); viewHome();
-  },
   resetPrompts: async () => {
     if (!(await confirmBox('Reset all prompts to their defaults?'))) return;
     S.settings.prompts = { ...DEFAULT_PROMPTS }; persistSettings.flush(); viewHome();
   },
   backup: async () => {
-    const data = { app: 'chatforge', version: 1, exported: Date.now(), settings: S.settings, characters: Object.values(S.chars), lorebooks: Object.values(S.books), chats: Object.values(S.chats) };
+    const data = { app: 'chatforge', version: 1, exported: Date.now(), settings: S.settings, characters: Object.values(S.chars), lorebooks: Object.values(S.books), chats: Object.values(S.chats), personas: Object.values(S.personas) };
     await saveFile(`chatforge-backup-${new Date().toISOString().slice(0, 10)}.json`, new Blob([JSON.stringify(data)], { type: 'application/json' }));
     toast('Backup contains your API keys — keep it private.', 4000);
   },
@@ -478,16 +492,234 @@ const settingsActs = {
       for (const c of d.characters) await saveChar(c);
       for (const b of d.lorebooks) await saveBook(b);
       for (const c of d.chats) await saveChat(c);
+      for (const p of d.personas || []) await savePersona(p);
       if (d.settings) { S.settings = { ...S.settings, ...d.settings }; await saveSettings(S.settings); }
       toast('Backup imported'); viewHome();
     } catch (e) { toast(e.message, 4000); }
   },
   wipe: async () => {
     if (!(await confirmBox('Erase ALL characters, lorebooks, chats and settings? This cannot be undone.', 'Erase everything', true))) return;
-    for (const s of ['characters', 'lorebooks', 'chats', 'kv']) await db.clear(s);
+    for (const s of ['characters', 'lorebooks', 'chats', 'personas', 'kv']) await db.clear(s);
     location.reload();
   },
 };
+
+// =====================================================================
+// PERSONAS
+// =====================================================================
+
+const folderList = () => [...new Set([...S.settings.personaFolders, ...Object.values(S.personas).map((p) => p.folder).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
+
+function personaMatches(p, q) {
+  return !q || [p.name, p.description, p.folder].join(' ').toLowerCase().includes(q);
+}
+
+function personaRows(list) {
+  const def = defaultPersona().id;
+  return list.map((p) => `<div class="row-item" data-act="openPersona" data-id="${p.id}">
+    <img class="p-av" src="${personaAvatar(p)}" alt=""><div class="grow"><div class="ri-title">${esc(p.name)}${p.id === def ? '<span class="badge accent">default</span>' : ''}${p.source === 'chub' ? '<span class="badge">chub</span>' : ''}</div>
+    <div class="ri-sub">${esc(p.description.slice(0, 110)) || '<span class="muted">No description</span>'}</div></div>
+    <button class="icon-btn sm" data-act="personaMenu" data-id="${p.id}" aria-label="Options">${ICON.more}</button></div>`).join('');
+}
+
+/** List body for the personas tab, honouring the search box and folder filter. */
+function personaListHtml() {
+  const q = S.personaQuery.trim().toLowerCase();
+  const f = S.personaFolder;
+  const all = Object.values(S.personas).sort((a, b) => a.name.localeCompare(b.name));
+  const inFolder = all.filter((p) => (f === '*' || (p.folder || '') === f) && personaMatches(p, q));
+  if (!inFolder.length) return `<p class="muted center pad">${q ? 'No personas match your search.' : 'No personas in this folder.'}</p>`;
+  if (f !== '*' || q) return `<div class="list">${personaRows(inFolder)}</div>`;
+  // "All" without a search: group by folder
+  const groups = [...folderList().map((name) => [name, inFolder.filter((p) => p.folder === name)]), ['', inFolder.filter((p) => !p.folder)]];
+  return groups.filter(([, ps]) => ps.length).map(([name, ps]) => `<div class="folder-head" data-act="pickFolder" data-folder="${esc(name)}">${ICON.folder}<span>${esc(name || 'Unfiled')}</span><span class="muted small">${ps.length}</span></div>
+    <div class="list">${personaRows(ps)}</div>`).join('');
+}
+
+function homePersonas() {
+  const chip = (val, label) => `<button class="chip ${S.personaFolder === val ? 'on' : ''}" data-act="pickFolder" data-folder="${esc(val)}">${esc(label)}</button>`;
+  return `<div class="pad sticky-search"><input class="input" id="personaSearch" type="search" placeholder="Search personas…" value="${esc(S.personaQuery)}"></div>
+    <div class="chips">${chip('*', 'All')}${folderList().map((f) => chip(f, f)).join('')}${chip('', 'Unfiled')}<button class="chip add" data-act="newFolder">${ICON.plus} Folder</button></div>
+    <div id="personaList">${personaListHtml()}</div>`;
+}
+
+function wirePersonas() {
+  $('#personaSearch').addEventListener('input', (e) => {
+    S.personaQuery = e.target.value;
+    $('#personaList').innerHTML = personaListHtml();
+  });
+}
+
+async function createPersona() {
+  const folder = S.personaFolder === '*' ? '' : S.personaFolder;
+  const p = newPersona({ name: 'New Persona', folder });
+  await savePersona(p);
+  go('/persona/' + p.id);
+}
+
+async function newFolderPrompt() {
+  const name = (await promptBox('New folder', '', { placeholder: 'e.g. Fantasy' }))?.trim();
+  if (!name) return null;
+  if (!S.settings.personaFolders.includes(name)) S.settings.personaFolders.push(name);
+  persistSettings.flush();
+  return name;
+}
+
+async function moveToFolder(p) {
+  let pick = null; // set synchronously by the chosen item, before menu() resolves
+  await menu(`Move “${p.name}” to…`, [
+    { label: 'Unfiled', run: () => { pick = ''; } },
+    ...folderList().map((f) => ({ label: f + (p.folder === f ? '  ✓' : ''), run: () => { pick = f; } })),
+    { label: '+ New folder…', run: () => { pick = newFolderPrompt(); } },
+  ]);
+  const choice = await pick;
+  if (choice == null) return false;
+  p.folder = choice;
+  await savePersona(p);
+  return true;
+}
+
+function manageFolders() {
+  const folders = folderList();
+  menu('Persona folders', [
+    { label: '+ New folder', run: async () => { await newFolderPrompt(); viewHome(); } },
+    ...folders.map((f) => ({ label: `${f}  (${Object.values(S.personas).filter((p) => p.folder === f).length})`, run: () => menu(f, [
+      { label: 'Rename', run: async () => {
+        const n = (await promptBox('Rename folder', f))?.trim();
+        if (!n || n === f) return;
+        S.settings.personaFolders = [...new Set(S.settings.personaFolders.map((x) => (x === f ? n : x)).concat(n))];
+        for (const p of Object.values(S.personas)) if (p.folder === f) { p.folder = n; await savePersona(p); }
+        if (S.personaFolder === f) S.personaFolder = n;
+        persistSettings.flush(); viewHome();
+      } },
+      { label: 'Delete folder (personas become unfiled)', danger: true, run: async () => {
+        S.settings.personaFolders = S.settings.personaFolders.filter((x) => x !== f);
+        for (const p of Object.values(S.personas)) if (p.folder === f) { p.folder = ''; await savePersona(p); }
+        if (S.personaFolder === f) S.personaFolder = '*';
+        persistSettings.flush(); viewHome();
+      } },
+    ]) })),
+  ]);
+}
+
+function personaMenu(p) {
+  menu(p.name, [
+    { label: 'Set as default', run: () => { S.settings.activePersonaId = p.id; persistSettings.flush(); viewHome(); } },
+    { label: 'Move to folder…', run: async () => { if (await moveToFolder(p)) viewHome(); } },
+    { label: 'Duplicate', run: async () => { await savePersona({ ...structuredClone(p), id: uid(), name: p.name + ' (copy)', created: Date.now() }); viewHome(); } },
+    { label: 'Delete', danger: true, run: () => deletePersona(p) },
+  ]);
+}
+
+async function deletePersona(p) {
+  if (Object.keys(S.personas).length <= 1) return toast('Keep at least one persona');
+  if (!(await confirmBox(`Delete persona “${p.name}”? Chats using it switch to your default persona.`, 'Delete', true))) return false;
+  await db.del('personas', p.id);
+  delete S.personas[p.id];
+  if (S.settings.activePersonaId === p.id) { S.settings.activePersonaId = sortByUpdated(S.personas)[0].id; persistSettings.flush(); }
+  if (parts()[0] === 'persona') go('/personas'); else viewHome();
+  return true;
+}
+
+function exportPersonas() {
+  const data = { app: 'chatforge', kind: 'personas', personas: Object.values(S.personas).map(({ name, description, avatar, folder }) => ({ name, description, avatar, folder })) };
+  saveFile('chatforge-personas.json', new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+}
+
+/** Imports ChatForge persona exports, single persona JSON, or SillyTavern persona backups. */
+async function importPersonasFile() {
+  const f = await pickFile('.json,application/json');
+  if (!f) return;
+  try {
+    const j = JSON.parse(await f.text());
+    let list = [];
+    if (Array.isArray(j)) list = j;
+    else if (Array.isArray(j.personas)) list = j.personas;
+    else if (j.personas && typeof j.personas === 'object') {
+      // SillyTavern: { personas: {file: name}, persona_descriptions: {file: {description}} }
+      list = Object.entries(j.personas).map(([file, name]) => ({ name, description: j.persona_descriptions?.[file]?.description || '' }));
+    } else if (j.name) list = [j];
+    if (!list.length) throw new Error('No personas found in that file');
+    const folder = S.personaFolder === '*' ? '' : S.personaFolder;
+    for (const x of list) {
+      await savePersona(newPersona({ name: String(x.name || 'Persona'), description: String(x.description || ''), avatar: x.avatar || '', folder: x.folder ?? folder }));
+    }
+    toast(`Imported ${list.length} persona${list.length > 1 ? 's' : ''}`);
+    viewHome();
+  } catch (e) { toast(e.message, 4000); }
+}
+
+const personaActs = {
+  openPersona: (el, e) => { if (!e.target.closest('[data-act=personaMenu]')) go('/persona/' + el.dataset.id); },
+  personaMenu: (el, e) => { e.stopPropagation(); personaMenu(S.personas[el.dataset.id]); },
+  pickFolder: (el) => { S.personaFolder = el.dataset.folder; viewHome(); },
+  newFolder: async () => { const n = await newFolderPrompt(); if (n) { S.personaFolder = n; viewHome(); } },
+  folders: manageFolders,
+  importPersona: () => menu('Personas', [
+    { label: 'Import from file (JSON)', run: importPersonasFile },
+    { label: 'Export all personas', run: exportPersonas },
+  ]),
+};
+
+function viewPersonaEditor(p) {
+  const save = debounce(() => savePersona(p), 400);
+  const isDefault = () => defaultPersona().id === p.id;
+  const folderOpts = () => `<option value="">Unfiled</option>${folderList().map((f) => `<option value="${esc(f)}">${esc(f)}</option>`).join('')}<option value="__new">+ New folder…</option>`;
+  app.innerHTML = `${header({ title: esc(p.name), sub: 'Persona', actions: `<button class="icon-btn" data-act="more" aria-label="More">${ICON.more}</button>` })}
+  <main class="scroll pad-bottom" id="main">
+    <div class="char-head"><img class="big-av round" src="${personaAvatar(p)}" data-act="avatar" alt="Avatar — tap to change"><div class="grow">
+      <label>Name<input class="input" data-bind="name"></label>
+      <label>Folder<select class="input" id="folderSel">${folderOpts()}</select></label></div></div>
+    <section class="panel">
+      <label>Description<span class="hint">Who you are in the roleplay: appearance, personality, background. Sent to the model as “About {{user}}”.</span><textarea class="input" rows="8" data-bind="description"></textarea></label>
+      <button class="btn ${isDefault() ? 'ghost' : ''}" data-act="makeDefault" ${isDefault() ? 'disabled' : ''}>${isDefault() ? '✓ Default persona' : 'Set as default persona'}</button>
+    </section>
+  </main>`;
+  const sel = $('#folderSel');
+  sel.value = p.folder || '';
+  sel.addEventListener('change', async () => {
+    if (sel.value === '__new') {
+      const n = await newFolderPrompt();
+      if (n) p.folder = n;
+      sel.innerHTML = folderOpts();
+      sel.value = p.folder || '';
+    } else p.folder = sel.value;
+    save.flush();
+  });
+  bindFields($('#main'), p, (path) => { if (path === 'name') $('.top .title').firstChild.textContent = p.name; save(); });
+  handleActs({
+    avatar: async () => {
+      const f = await pickFile('image/*');
+      if (!f) return;
+      p.avatar = await resizeImage(await readAsDataUrl(f), 512);
+      await savePersona(p); $('.big-av').src = p.avatar;
+    },
+    makeDefault: () => { S.settings.activePersonaId = p.id; persistSettings.flush(); viewPersonaEditor(p); toast(`${p.name} is now your default persona`); },
+    more: () => menu(p.name, [
+      { label: 'Duplicate', run: async () => { const d = { ...structuredClone(p), id: uid(), name: p.name + ' (copy)', created: Date.now() }; await savePersona(d); go('/persona/' + d.id); } },
+      { label: 'Delete persona', danger: true, run: () => deletePersona(p) },
+    ]),
+  });
+}
+
+/**
+ * Searchable persona picker. Resolves with a persona id, null for "use default" (when allowDefault),
+ * or undefined if cancelled.
+ */
+function pickPersona(title, currentId = null, allowDefault = false) {
+  const all = Object.values(S.personas).sort((a, b) => (a.folder || '￿').localeCompare(b.folder || '￿') || a.name.localeCompare(b.name));
+  const row = (p) => `<button class="pick pp" data-id="${p.id}" data-q="${esc([p.name, p.description, p.folder].join(' ').toLowerCase())}">
+    <img src="${personaAvatar(p)}" alt=""><span>${esc(p.name)}${p.folder ? `<small class="muted"> · ${esc(p.folder)}</small>` : ''}</span>${p.id === currentId ? '<b class="ord">✓</b>' : ''}</button>`;
+  return sheet(`<h3>${esc(title)}</h3><input class="input" type="search" placeholder="Search personas…" data-f>
+    <div class="pick-list">${allowDefault ? `<button class="pick pp" data-id="" data-q="default"><span>Use default (${esc(defaultPersona().name)})</span>${!currentId ? '<b class="ord">✓</b>' : ''}</button>` : ''}${all.map(row).join('')}</div>`,
+  (el, close) => {
+    el.querySelector('[data-f]').addEventListener('input', (e) => {
+      const q = e.target.value.toLowerCase();
+      $$('.pp', el).forEach((b) => { b.style.display = b.dataset.q.includes(q) ? '' : 'none'; });
+    });
+    el.addEventListener('click', (e) => { const b = e.target.closest('.pp'); if (b) close(b.dataset.id || null); });
+  });
+}
 
 // =====================================================================
 // CHARACTER EDITOR
@@ -684,12 +916,20 @@ function viewLoreEditor(id) {
 // CHUB BROWSER
 // =====================================================================
 
+const SUGGESTED_TAGS = ['Female', 'Male', 'OC', 'Fantasy', 'Romance', 'Anime', 'Roleplay', 'Scenario', 'Adventure', 'Sci-Fi', 'Horror', 'Comedy', 'Fluff', 'Angst', 'Drama', 'Multiple Characters', 'Monster', 'Game Characters', 'Historical', 'Modern'];
+
 function viewChub() {
   const C = S.chub;
+  const tagsOf = (s) => s.split(',').map((t) => t.trim()).filter(Boolean);
+  const renderTags = () => {
+    const inc = tagsOf(C.tags).map((t) => `<button class="chip on" data-act="dropTag" data-tag="${esc(t)}">${esc(t)}<span class="x">✕</span></button>`);
+    const exc = tagsOf(C.excludeTags).map((t) => `<button class="chip ex" data-act="dropEx" data-tag="${esc(t)}">−${esc(t)}<span class="x">✕</span></button>`);
+    $('#tagRow').innerHTML = `${inc.join('')}${exc.join('')}<button class="chip add" data-act="addTag">${ICON.tag} Tag</button>`;
+  };
   const renderResults = () => {
     $('#results').innerHTML = C.results.map((r, i) => `<div class="card" data-act="preview" data-i="${i}"><img src="${esc(r.avatar)}" loading="lazy" alt="" referrerpolicy="no-referrer">
       <div class="card-body"><div class="card-title">${esc(r.name)}</div><div class="card-sub">${esc(r.tagline.slice(0, 90))}</div>
-      <div class="muted small">★ ${r.stars}</div></div></div>`).join('') || (C.loading ? '' : '<p class="muted center">No results.</p>');
+      <div class="muted small">★ ${r.stars}<span class="src">${esc(BOT_SOURCES[r.source]?.label || r.source)}</span></div></div></div>`).join('') || (C.loading ? '' : '<p class="muted center">No results.</p>');
     $('#more').style.display = C.results.length && !C.done ? '' : 'none';
     $('#spin').style.display = C.loading ? '' : 'none';
   };
@@ -698,43 +938,87 @@ function viewChub() {
     C.loading = true;
     if (!append) { C.page = 1; C.results = []; C.done = false; }
     renderResults();
-    try {
-      const r = await chubSearch({ query: C.query, page: C.page, sort: C.sort, nsfw: S.settings.showNsfw, key: chubKey() });
-      C.results.push(...r);
-      C.done = r.length < 24;
-      C.page++;
-    } catch (e) { toast(chubError(e), 5000); }
+    const { results, errors, done } = await browseSearch({
+      query: C.query, tags: tagsOf(C.tags), excludeTags: tagsOf(C.excludeTags), page: C.page,
+      sort: C.sort, nsfw: S.settings.showNsfw, key: chubKey(),
+    });
+    const have = new Set(C.results.map((r) => r.id));
+    C.results.push(...results.filter((r) => !have.has(r.id)));
+    C.done = done;
+    C.page++;
+    errors.forEach((e) => toast(`${BOT_SOURCES[e.source].label}: ${chubError(e.error)}`, 5000));
     C.loading = false;
     renderResults();
   };
+  const addTag = (t, exclude = false) => {
+    const key = exclude ? 'excludeTags' : 'tags';
+    const other = exclude ? 'tags' : 'excludeTags';
+    const lc = t.toLowerCase();
+    C[other] = tagsOf(C[other]).filter((x) => x.toLowerCase() !== lc).join(',');
+    if (!tagsOf(C[key]).some((x) => x.toLowerCase() === lc)) C[key] = [...tagsOf(C[key]), t].join(',');
+    renderTags(); search();
+  };
 
-  app.innerHTML = `${header({ title: 'Browse Chub', actions: `<button class="btn sm" data-act="url">Import URL</button>` })}
+  app.innerHTML = `${header({ title: 'Browse bots', actions: `<button class="btn sm" data-act="url">Import URL</button>` })}
   <main class="scroll pad-bottom" id="main">
-    <div class="row pad"><input class="input grow" id="q" placeholder="Search characters…" value="${esc(C.query)}" enterkeyhint="search">
+    <div class="row pad"><input class="input grow" id="q" type="search" placeholder="Search characters…" value="${esc(C.query)}" enterkeyhint="search">
       <select class="input narrow" id="sort"><option value="download_count">Popular</option><option value="star_count">Stars</option><option value="created_at">Newest</option><option value="last_activity_at">Updated</option></select></div>
+    <div class="chips wrap" id="tagRow"></div>
     <div class="grid" id="results"></div>
     <div class="center pad"><div class="spinner" id="spin"></div><button class="btn" id="more" data-act="more">Load more</button></div>
   </main>`;
   $('#sort').value = C.sort;
   $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter') { C.query = e.target.value; e.target.blur(); search(); } });
+  $('#q').addEventListener('search', (e) => { if (!e.target.value && C.query) { C.query = ''; search(); } });
   $('#sort').addEventListener('change', (e) => { C.sort = e.target.value; search(); });
+  renderTags();
   if (!C.results.length) search(); else renderResults();
 
   handleActs({
     more: () => search(true),
     url: () => chubUrlImport(),
+    dropTag: (el) => { C.tags = tagsOf(C.tags).filter((t) => t !== el.dataset.tag).join(','); renderTags(); search(); },
+    dropEx: (el) => { C.excludeTags = tagsOf(C.excludeTags).filter((t) => t !== el.dataset.tag).join(','); renderTags(); search(); },
+    addTag: () => sheet(`<h3>Filter by tag</h3><input class="input" data-t placeholder="Type a tag, e.g. fantasy" autocapitalize="off">
+      <div class="row"><button class="btn primary grow" data-mode="inc">Include</button><button class="btn grow" data-mode="exc">Exclude</button></div>
+      <p class="hint">Popular tags — tap to include, long-press to exclude:</p>
+      <div class="chips wrap flush">${SUGGESTED_TAGS.map((t) => `<button class="chip" data-sug="${esc(t)}">${esc(t)}</button>`).join('')}</div>`,
+    (el, close) => {
+      const inp = el.querySelector('[data-t]');
+      setTimeout(() => inp.focus(), 50);
+      const done = (t, ex) => { t = t.trim(); if (!t) return; close(); addTag(t, ex); };
+      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') done(inp.value, false); });
+      let longPressed = false;
+      let timer;
+      el.addEventListener('pointerdown', (e) => {
+        const b = e.target.closest('[data-sug]');
+        longPressed = false;
+        if (b) timer = setTimeout(() => { longPressed = true; done(b.dataset.sug, true); }, 500);
+      });
+      el.addEventListener('pointerup', () => clearTimeout(timer));
+      el.addEventListener('pointerleave', () => clearTimeout(timer));
+      el.addEventListener('contextmenu', (e) => e.preventDefault());
+      el.addEventListener('click', (e) => {
+        const m = e.target.closest('[data-mode]');
+        if (m) return done(inp.value, m.dataset.mode === 'exc');
+        const b = e.target.closest('[data-sug]');
+        if (b && !longPressed) done(b.dataset.sug, false);
+      });
+    }),
     preview: (el) => {
       const r = C.results[+el.dataset.i];
-      sheet(`<div class="preview"><img src="${esc(r.avatar)}" alt="" referrerpolicy="no-referrer"><div><h3>${esc(r.name)}</h3><p class="muted small">by ${esc(r.path.split('/')[0])} · ★ ${r.stars}</p></div></div>
-        <p>${esc(r.tagline)}</p><div class="tags">${r.tags.slice(0, 12).map((t) => `<span class="badge">${esc(t)}</span>`).join('')}</div>
+      sheet(`<div class="preview"><img src="${esc(r.avatar)}" alt="" referrerpolicy="no-referrer"><div><h3>${esc(r.name)}</h3><p class="muted small">by ${esc(r.creator || r.path?.split('/')[0] || 'unknown')} · ★ ${r.stars} · ${esc(BOT_SOURCES[r.source]?.label || r.source)}</p></div></div>
+        <p>${esc(r.tagline)}</p><p class="hint">Tap a tag to search with it:</p><div class="tags">${r.tags.slice(0, 20).map((t) => `<button class="badge tagbtn" data-tag="${esc(t)}">${esc(t)}</button>`).join('')}</div>
         <div class="row end"><button class="btn ghost" data-x="0">Close</button><button class="btn primary" data-x="1">Import</button></div>`,
       (sh, close) => sh.addEventListener('click', async (e) => {
+        const t = e.target.closest('[data-tag]');
+        if (t) { close(); addTag(t.dataset.tag); return; }
         const b = e.target.closest('[data-x]');
         if (!b) return;
         if (b.dataset.x === '0') return close();
         b.disabled = true; b.textContent = 'Importing…';
         try {
-          const c = await chubImportCharacter(r.path, chubKey());
+          const c = await importBrowseResult(r, { key: chubKey() });
           await saveChar(c);
           close();
           toast(`Imported ${c.name}`);
@@ -750,18 +1034,19 @@ function viewChub() {
 // =====================================================================
 
 const isGenerating = (chat) => S.abort && S.genChatId === chat.id;
-const nameOf = (m) => (m.role === 'user' ? S.settings.persona.name : m.role === 'narrator' ? 'Narrator' : m.name || S.chars[m.charId]?.name || 'Character');
+const msgPersona = (m, chat) => S.personas[m.personaId] || personaFor(chat);
+const nameOf = (m, chat) => (m.role === 'user' ? msgPersona(m, chat).name : m.role === 'narrator' ? 'Narrator' : m.name || S.chars[m.charId]?.name || 'Character');
 
 function msgHtml(chat, m, idx) {
   const c = S.chars[m.charId];
   const isLast = idx === chat.messages.length - 1;
-  const av = m.role === 'user' ? userAvatar() : m.role === 'narrator' ? '' : avatarOf(c || { name: m.name });
+  const av = m.role === 'user' ? personaAvatar(msgPersona(m, chat)) : m.role === 'narrator' ? '' : avatarOf(c || { name: m.name });
   const showSwipes = m.role === 'char' && (m.swipes.length > 1 || isLast);
   const editing = S.editingMsg === m.id;
   return `<div class="msg ${m.role}" data-mid="${m.id}">
     ${av ? `<img class="av" src="${av}" alt="">` : ''}
     <div class="bubble" data-act="msgMenu" data-id="${m.id}">
-      <div class="meta"><span class="name">${esc(nameOf(m))}</span></div>
+      <div class="meta"><span class="name">${esc(nameOf(m, chat))}</span></div>
       ${editing
         ? `<textarea class="input edit-ta">${esc(msgText(m))}</textarea><div class="row end"><button class="btn ghost sm" data-act="editCancel">Cancel</button><button class="btn primary sm" data-act="editSave" data-id="${m.id}">Save</button></div>`
         : `<div class="text">${fmt(msgText(m)) || '<span class="typing"><i></i><i></i><i></i></span>'}</div>`}
@@ -773,7 +1058,8 @@ function msgHtml(chat, m, idx) {
 function viewChat(chat) {
   const members = chat.characterIds.map((id) => S.chars[id]).filter(Boolean);
   const isGroup = members.length > 1;
-  app.innerHTML = `${header({
+  app.classList.add('view-chat');
+  app.innerHTML = `<div class="chat-bg" id="chatBg"></div>${header({
     title: `<span data-act="settings">${esc(chatTitle(chat))}</span>`,
     sub: isGroup ? `${members.length} characters · ${{ natural: 'natural order', round: 'round robin', manual: 'manual turns' }[chat.groupMode]}` : '',
     actions: `<button class="icon-btn" data-act="chatMore" aria-label="Chat options">${ICON.more}</button>`,
@@ -791,6 +1077,7 @@ function viewChat(chat) {
   autoGrow(input);
   input.addEventListener('input', () => { autoGrow(input); try { localStorage.setItem(draftKey, input.value); } catch { /* ignore */ } });
   scrollToBottom(true);
+  updateChatBg(chat);
 
   const findMsg = (id) => chat.messages.find((m) => m.id === id);
   handleActs({
@@ -798,6 +1085,7 @@ function viewChat(chat) {
     chatMore: () => menu(chatTitle(chat), [
       { label: 'Chat settings & members', run: () => go(`/chat/${chat.id}/settings`) },
       { label: 'Add a character', run: () => addMembers(chat) },
+      { label: `Switch persona (now: ${personaFor(chat).name})`, run: () => switchChatPersona(chat) },
       { label: 'View last prompt', run: showLastPrompt },
       { label: 'Export chat (JSON)', run: () => exportChat(chat) },
     ]),
@@ -824,10 +1112,47 @@ function viewChat(chat) {
   });
 }
 
+/** Character shown behind the chat: whoever spoke last, else the first member. */
+function chatBgChar(chat) {
+  for (let i = chat.messages.length - 1; i >= 0; i--) {
+    const m = chat.messages[i];
+    if (m.role === 'char' && S.chars[m.charId]) return S.chars[m.charId];
+  }
+  return S.chars[chat.characterIds[0]];
+}
+
+function updateChatBg(chat) {
+  const host = $('#chatBg');
+  const cfg = S.settings.chatBg;
+  if (!host) return;
+  const c = cfg.enabled ? chatBgChar(chat) : null;
+  if (!c) { host.innerHTML = ''; host.dataset.cid = ''; return; }
+  host.style.setProperty('--bg-blur', cfg.blur + 'px');
+  host.style.setProperty('--bg-dim', cfg.dim);
+  if (host.dataset.cid === c.id) return;
+  host.dataset.cid = c.id;
+  const layer = document.createElement('div');
+  layer.className = 'bg-layer';
+  layer.style.backgroundImage = `url("${avatarOf(c)}")`;
+  host.appendChild(layer);
+  requestAnimationFrame(() => requestAnimationFrame(() => layer.classList.add('on')));
+  [...host.children].slice(0, -1).forEach((old) => { old.classList.remove('on'); setTimeout(() => old.remove(), 700); });
+}
+
+async function switchChatPersona(chat) {
+  const id = await pickPersona('Your persona in this chat', chat.personaId, true);
+  if (id === undefined) return;
+  chat.personaId = id;
+  await saveChat(chat);
+  toast(`You are now ${personaFor(chat).name} in this chat`);
+  route();
+}
+
 function renderMessages(chat) {
   const box = $('#msgs');
   if (!box) return;
   box.innerHTML = chat.messages.map((m, i) => msgHtml(chat, m, i)).join('');
+  updateChatBg(chat);
   const ta = $('.edit-ta', box);
   if (ta) { autoGrow(ta); ta.addEventListener('input', () => autoGrow(ta)); ta.focus(); }
 }
@@ -893,7 +1218,7 @@ async function sendMessage(chat, forceSpeakerId = null) {
     let role = 'user';
     const nm = text.match(/^\/(n|narrate|narrator)\s+([\s\S]+)/i);
     if (nm) { role = 'narrator'; text = nm[2]; }
-    chat.messages.push(newMessage({ role, swipes: [text] }));
+    chat.messages.push(newMessage({ role, swipes: [text], personaId: role === 'user' ? personaFor(chat).id : null }));
     input.value = ''; autoGrow(input);
     try { localStorage.removeItem('draft:' + chat.id); } catch { /* ignore */ }
     await saveChat(chat);
@@ -903,7 +1228,7 @@ async function sendMessage(chat, forceSpeakerId = null) {
   let speakers;
   if (forceSpeakerId) speakers = [S.chars[forceSpeakerId]];
   else {
-    speakers = pickSpeakers(chat, S.chars, text, S.settings.persona.name);
+    speakers = pickSpeakers(chat, S.chars, text, personaFor(chat).name);
     if (!speakers.length) {
       if (chat.characterIds.length > 1 && chat.groupMode === 'manual') return toast('Tap a character above the input to choose who replies');
       if (!chat.characterIds.length) return toast('This chat has no characters — add some in chat settings');
@@ -961,7 +1286,7 @@ async function generateInto(chat, m, speaker, mode) {
   const idx = chat.messages.indexOf(m);
   const history = mode === 'continue' ? chat.messages.slice(0, idx + 1) : chat.messages.slice(0, idx);
   const base = mode === 'continue' ? msgText(m) : '';
-  const prompt = buildPrompt(chat, speaker, { settings: S.settings, characters: S.chars, books: booksFor(chat), history, mode });
+  const prompt = buildPrompt(chat, speaker, { settings: { ...S.settings, persona: personaFor(chat) }, characters: S.chars, books: booksFor(chat), history, mode });
   S.lastPrompt = { ...prompt, speaker: speaker.name, at: Date.now() };
 
   const join = (t) => (mode === 'continue' ? base + (base && t && !/^[\s,.!?;:'")\]]/.test(t) && !/\s$/.test(base) ? ' ' : '') + t : t);
@@ -1003,7 +1328,7 @@ async function addMembers(chat) {
   const r = await pickCharacters('Add characters', chat.characterIds, 'Add');
   if (!r) return;
   chat.characterIds.push(...r.ids);
-  if (r.allGreetings) r.ids.forEach((id) => { const g = greetingMessage(S.chars[id]); if (g) chat.messages.push(g); });
+  if (r.allGreetings) r.ids.forEach((id) => { const g = greetingMessage(S.chars[id], personaFor(chat).name); if (g) chat.messages.push(g); });
   await saveChat(chat);
   route();
 }
@@ -1016,7 +1341,9 @@ function viewChatSettings(chat) {
   const members = chat.characterIds.map((id) => S.chars[id] || { id, name: '(deleted)', avatar: '' });
   app.innerHTML = `${header({ title: 'Chat settings' })}
   <main class="scroll pad-bottom" id="main">
-    <section class="panel"><label>Title<input class="input" data-bind="title" placeholder="${esc(chat.characterIds.map((id) => S.chars[id]?.name).join(', '))}"></label></section>
+    <section class="panel"><label>Title<input class="input" data-bind="title" placeholder="${esc(chat.characterIds.map((id) => S.chars[id]?.name).join(', '))}"></label>
+      <div class="row"><img class="p-av" src="${personaAvatar(personaFor(chat))}" alt=""><div class="grow"><b>You: ${esc(personaFor(chat).name)}</b>
+        <div class="muted small">${chat.personaId ? 'Persona chosen for this chat' : 'Using your default persona'}</div></div><button class="btn sm" data-act="persona">Change</button></div></section>
     <section class="panel"><div class="row between"><h2>Characters</h2><button class="btn sm" data-act="add">${ICON.plus} Add</button></div>
       ${members.map((c, i) => `<div class="member"><img src="${avatarOf(c)}" alt=""><span class="grow">${esc(c.name)}</span>
         <button class="icon-btn xs" data-act="up" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move up">▲</button>
@@ -1047,6 +1374,7 @@ function viewChatSettings(chat) {
     if (t.hasAttribute('data-chatbook')) { chat.lorebookIds = $$('[data-chatbook]:checked', main).map((x) => x.value); save(); }
   });
   handleActs({
+    persona: async () => { await switchChatPersona(chat); },
     add: () => addMembers(chat),
     up: (el) => { const i = +el.dataset.i; [chat.characterIds[i - 1], chat.characterIds[i]] = [chat.characterIds[i], chat.characterIds[i - 1]]; save.flush(); viewChatSettings(chat); },
     remove: async (el) => {
@@ -1072,12 +1400,20 @@ async function boot() {
   for (const c of await db.all('characters')) S.chars[c.id] = c;
   for (const b of await db.all('lorebooks')) S.books[b.id] = b;
   for (const c of await db.all('chats')) S.chats[c.id] = c;
+  for (const p of await db.all('personas')) S.personas[p.id] = p;
+  if (!Object.keys(S.personas).length) {
+    const lp = S.settings.persona;
+    const p = newPersona({ name: lp.name || 'User', description: lp.description || '', avatar: lp.avatar || '' });
+    await savePersona(p);
+    S.settings.activePersonaId = p.id;
+    await saveSettings(S.settings);
+  }
   window.addEventListener('hashchange', route);
   onBack(() => {
     if (closeTopModal()) return true;
     if (S.editingMsg) { S.editingMsg = null; route(); return true; }
     const [view] = parts();
-    if (!view || ['chats', 'characters', 'lorebooks', 'settings'].includes(view)) {
+    if (!view || HOME_TABS.includes(view)) {
       if (S.homeTab !== 'chats') { go('/chats'); return true; }
       return false;
     }

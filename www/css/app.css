@@ -224,3 +224,42 @@ label .hint { margin: 1px 0 0; }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 .spinner { width: 28px; height: 28px; border: 3px solid var(--bg3); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin: 10px auto; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- personas ---------- */
+.p-av { width: 46px; height: 46px; border-radius: 50%; object-fit: cover; flex: none; }
+.big-av.round { width: 108px; height: 108px; border-radius: 50%; }
+.badge.accent { background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--accent); }
+.sticky-search { position: sticky; top: 0; background: var(--bg); z-index: 2; padding-bottom: 6px; }
+.chips { display: flex; gap: 6px; overflow-x: auto; padding: 0 16px 10px; scrollbar-width: none; }
+.chip { flex: none; background: var(--bg2); border: 1px solid var(--line); border-radius: 18px; padding: 6px 13px; font-size: 13.5px; display: inline-flex; align-items: center; gap: 4px; }
+.chip svg { width: 15px; height: 15px; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.chip.add { color: var(--muted); border-style: dashed; }
+.chip .x { opacity: .7; margin-left: 2px; }
+.folder-head { display: flex; align-items: center; gap: 8px; padding: 14px 16px 2px; font-weight: 650; color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .04em; }
+.folder-head svg { width: 17px; height: 17px; }
+.folder-head span:first-of-type { flex: 1; }
+button.pick { width: 100%; background: none; border: 0; text-align: left; border-radius: 10px; }
+button.pick:active { background: var(--bg3); }
+
+/* ---------- chat background ---------- */
+#app { overflow: hidden; }
+.chat-bg { position: absolute; inset: 0; overflow: hidden; z-index: 0; pointer-events: none; background: var(--bg); }
+.bg-layer {
+  position: absolute; inset: -10%; background-size: cover; background-position: center 25%;
+  filter: blur(var(--bg-blur, 14px)) saturate(1.15); transform: scale(1.15); opacity: 0; transition: opacity .6s ease;
+}
+.bg-layer.on { opacity: 1; }
+.chat-bg::after { content: ""; position: absolute; inset: 0; background: linear-gradient(rgb(20 21 26 / var(--bg-dim, .55)), rgb(20 21 26 / calc(var(--bg-dim, .55) + .15))); }
+.view-chat > :not(.chat-bg) { position: relative; z-index: 1; }
+.view-chat .top, .view-chat .composer { background: rgb(20 21 26 / .7); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-color: rgb(255 255 255 / .06); }
+.view-chat .bubble { background: rgb(28 30 37 / .8); border-color: rgb(255 255 255 / .07); }
+.view-chat .msg.user .bubble { background: rgb(45 51 80 / .88); }
+.view-chat .msg.narrator .bubble { background: rgb(20 21 26 / .5); }
+.view-chat .speaker, .view-chat #input { background: rgb(28 30 37 / .85); }
+.tab span { white-space: nowrap; }
+.chips.wrap { flex-wrap: wrap; overflow: visible; }
+.chips.flush { padding: 0; margin-top: 4px; }
+.chip.ex { background: color-mix(in srgb, var(--danger) 20%, transparent); border-color: color-mix(in srgb, var(--danger) 50%, transparent); color: #ffb3bb; }
+.card .src { float: right; font-size: 11px; opacity: .8; }
+.tagbtn { border: 0; font: inherit; font-size: 12px; padding: 4px 9px; cursor: pointer; }

@@ -15,15 +15,24 @@ Everything is stored on the phone. There's no server and no account.
 1. **Settings → API connection**. Pick a Chub preset, paste your Chub API key, then tap **Test**.
    * **Fetch models** lists the models the endpoint offers.
    * You can add more connections, such as OpenRouter or a local KoboldCPP / text-generation-webui `…/v1` URL on your Wi-Fi, and switch between them.
-2. **Settings → Your persona**. Set your name and a short description.
+2. **Personas** tab. Edit the default persona (your name and a short description), or make several.
 3. **Characters → +** creates a character. You can also:
    * use **⬆** to import a Tavern card (`.png` or `.json`, V1/V2/V3)
-   * use **🔍** to search Chub and import directly
+   * use **🔍** to browse bots online (search by name and filter by tags) and import directly
 4. **Chats → +**. Pick one character for a 1-on-1 chat, or several for a group RP.
 
 ## Features
 
 **Characters.** Each character has a description, personality, scenario, a greeting plus alternate greetings (you swipe between them), example dialogue, a per-character system prompt, post-history instructions, tags, and talkativeness. You can export a character as a PNG card or JSON that works with SillyTavern, Chub, etc.
+
+**Personas**
+* Save as many personas as you want. Sort them into folders, and find them with the search bar.
+* One persona is your default. Any chat can use a different one (⋮ → Switch persona, or Chat settings).
+* Import/export persona JSON, including SillyTavern persona backups.
+
+**Chat background:** the bot's image fills the chat background, zoomed in, blurred and darkened. In group chats it fades to whoever spoke last. Turn it off or change the blur and darkness in Settings → Chat background.
+
+**Bot browser:** search by name and filter by tags. Add tags to include or exclude, or tap a tag on any bot to search with it.
 
 **Lorebooks**
 * Kinds: standalone books, books embedded in a character, and global books that are active in every chat.

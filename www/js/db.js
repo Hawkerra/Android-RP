@@ -1,7 +1,7 @@
 // Tiny IndexedDB wrapper. Every record is keyed by `id`.
 const DB_NAME = 'chatforge';
-const DB_VERSION = 1;
-export const STORES = ['characters', 'lorebooks', 'chats', 'kv'];
+const DB_VERSION = 2;
+export const STORES = ['characters', 'lorebooks', 'chats', 'personas', 'kv'];
 
 let dbPromise = null;
 
@@ -74,7 +74,10 @@ export function defaultSettings() {
       temperature: 0.9, max_tokens: 350, top_p: 1, min_p: 0, frequency_penalty: 0,
       presence_penalty: 0, repetition_penalty: 1, context_size: 8192, stream: true,
     },
-    persona: { name: 'User', description: '', avatar: '' },
+    persona: { name: 'User', description: '', avatar: '' }, // legacy single persona, migrated into the personas store
+    activePersonaId: null,
+    personaFolders: [],
+    chatBg: { enabled: true, blur: 14, dim: 0.55 },
     prompts: { ...DEFAULT_PROMPTS },
     globalLorebookIds: [],
     showNsfw: false,
@@ -88,7 +91,7 @@ export async function loadSettings() {
   const s = await db.get('kv', 'settings');
   if (!s) { def.activeConnectionId = def.connections[0].id; await db.put('kv', def); return def; }
   // shallow-merge new defaults into older saves
-  return { ...def, ...s, gen: { ...def.gen, ...s.gen }, prompts: { ...def.prompts, ...s.prompts }, persona: { ...def.persona, ...s.persona } };
+  return { ...def, ...s, gen: { ...def.gen, ...s.gen }, prompts: { ...def.prompts, ...s.prompts }, persona: { ...def.persona, ...s.persona }, chatBg: { ...def.chatBg, ...s.chatBg } };
 }
 
 export const saveSettings = (s) => db.put('kv', s);
@@ -118,10 +121,14 @@ export function newEntry(over = {}) {
 
 export function newChat(over = {}) {
   return {
-    id: uid(), title: '', characterIds: [], mutedIds: [], lorebookIds: [], groupMode: 'natural',
+    id: uid(), title: '', personaId: null, characterIds: [], mutedIds: [], lorebookIds: [], groupMode: 'natural',
     scenario: '', authorNote: '', authorNoteDepth: 4, messages: [],
     created: Date.now(), updated: Date.now(), ...over,
   };
+}
+
+export function newPersona(over = {}) {
+  return { id: uid(), name: 'User', description: '', avatar: '', folder: '', source: 'local', created: Date.now(), updated: Date.now(), ...over };
 }
 
 export function newMessage(over = {}) {
