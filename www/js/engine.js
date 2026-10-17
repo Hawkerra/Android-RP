@@ -92,6 +92,57 @@ export function scanLorebooks(books, messages, nameFn) {
 
 // ---------- Prompt building ----------
 
+/** The chat's optional World and Story fields. */
+function storyWorldBlocks(chat, M) {
+  const out = [];
+  if (chat.world?.trim()) out.push(`<world>\nThe world this story takes place in. Treat it as true, even where the character sheets don't mention it:\n${M(chat.world.trim())}\n</world>`);
+  if (chat.story?.trim()) out.push(`<story>\nThe premise and broad direction of this story. Steer toward it over time, and don't rush it:\n${M(chat.story.trim())}\n</story>`);
+  return out;
+}
+
+const norm = (s) => String(s || '').trim().toLowerCase();
+
+/** Tracker entries worth showing now: pinned, present in the scene, or mentioned recently. */
+export function relevantTrackerEntries(tracker, history, budgetTokens = 700) {
+  const entries = tracker?.entries || [];
+  if (!entries.length) return [];
+  const recent = history.slice(-8).map((m) => msgText(m)).join('\n').toLowerCase();
+  const present = new Set((tracker.scene?.present || []).map(norm));
+  const mentioned = (e) => [e.name, ...(e.aliases || [])].some((n) => {
+    const k = norm(n);
+    return k.length > 1 && new RegExp(`(^|\\W)${escapeRe(k)}(\\W|$)`).test(recent);
+  });
+  const score = (e) => (e.pinned ? 3 : 0) + (present.has(norm(e.name)) ? 2 : 0) + (mentioned(e) ? 1 : 0);
+  const picked = [];
+  let used = 0;
+  for (const e of entries.map((x) => ({ x, s: score(x) })).filter((y) => y.s > 0).sort((a, b) => b.s - a.s || (b.x.lastSeen || 0) - (a.x.lastSeen || 0))) {
+    const t = estimateTokens(e.x.details) + 8;
+    if (used + t > budgetTokens) continue;
+    used += t;
+    picked.push(e.x);
+  }
+  return picked;
+}
+
+/** The scene tracker's notes, formatted for the prompt. */
+export function trackerBlock(chat, history) {
+  const tr = chat.tracker;
+  if (!tr || tr.enabled === false) return '';
+  const sc = tr.scene || {};
+  const lines = [];
+  if (sc.location) lines.push(`Location: ${sc.location}`);
+  if (sc.time) lines.push(`Time: ${sc.time}`);
+  if (sc.present?.length) lines.push(`Present: ${sc.present.join(', ')}`);
+  if (sc.situation) lines.push(`Situation: ${sc.situation}`);
+  const ents = relevantTrackerEntries(tr, history);
+  if (ents.length) {
+    lines.push('People, places and things in play:');
+    for (const e of ents) lines.push(`- ${e.name}${e.aliases?.length ? ` (also: ${e.aliases.join(', ')})` : ''} [${e.kind}]: ${e.details}`);
+  }
+  if (!lines.length) return '';
+  return `<scene_notes>\nRunning notes on this story so far. Treat them as established facts unless the chat says otherwise:\n${lines.join('\n')}\n</scene_notes>`;
+}
+
 /** The persona's private section: reference for the writer, explicitly outside the story. */
 function personaPrivateBlock(userName, text) {
   return `<user_private_background name="${userName}">
@@ -107,7 +158,7 @@ ${text}
  * Builds an OpenAI chat-completions messages array for `speaker` replying in `chat`.
  * opts: { settings, characters (map id->char), lorebooks (array of book objects), mode: 'reply'|'continue' }
  */
-export function buildPrompt(chat, speaker, { settings, characters, books, history, mode = 'reply', extraInstruction = '' }) {
+export function buildPrompt(chat, speaker, { settings, characters, books, history, mode = 'reply', extraInstruction = '', direction = '' }) {
   const persona = settings.persona;
   const userName = persona.name || 'User';
   const members = chat.characterIds.map((id) => characters[id]).filter(Boolean);
@@ -139,11 +190,14 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
 
   const scenario = chat.scenario || speaker.scenario;
   if (scenario) sys.push(`Scenario: ${M(scenario)}`);
+  sys.push(...storyWorldBlocks(chat, M));
   if (persona.description) {
     sys.push(`<user_persona name="${userName}">\nWhat others can see or reasonably know about ${userName} (characters may notice and react to this):\n${M(persona.description)}\n</user_persona>`);
   }
   if (persona.private) sys.push(personaPrivateBlock(userName, M(persona.private)));
   if (lore.after.length) sys.push(M(lore.after.join('\n')));
+  const tracked = trackerBlock(chat, history, nameOf);
+  if (tracked) sys.push(tracked);
   if (speaker.mes_example) {
     const ex = M(speaker.mes_example).replace(/<START>/gi, '').trim();
     if (ex) sys.push(`Example of how ${speaker.name} writes:\n${ex}`);
@@ -157,6 +211,7 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
   if (persona.private) tail.push(`[Reminder: ${userName}'s private background is unknown to the characters. Nobody may mention, know or act on it, or claim ${userName} revealed it, unless it has actually come up in the chat.]`);
   if (mode === 'continue') tail.push('[Continue ' + speaker.name + "'s last message from exactly where it stopped. Do not repeat it.]");
   if (extraInstruction) tail.push(extraInstruction);
+  if (direction) tail.push(`[Director's note for this reply: ${M(direction)}\nMake this happen in this reply, naturally and in character, as part of the story. Never mention the note itself.]`);
   if (isGroup) tail.push(`[Write the next reply only as ${speaker.name}.]`);
 
   // --- History within the context budget ---
@@ -342,7 +397,7 @@ Respond with JSON only, no other text:
 If the reply is consistent, respond {"issues":[]}.`;
 
 /** Builds the messages for checking `reply` (spoken by `speaker`) against `history`. */
-export function buildContinuityCheck(chat, speaker, reply, { settings, characters, books, history }) {
+export function buildContinuityCheck(chat, speaker, reply, { settings, characters, books, history, direction = '' }) {
   const persona = settings.persona;
   const userName = persona.name || 'User';
   const members = chat.characterIds.map((id) => characters[id]).filter(Boolean);
@@ -362,6 +417,11 @@ export function buildContinuityCheck(chat, speaker, reply, { settings, character
   }
   const scenario = chat.scenario || speaker.scenario;
   if (scenario) record.push(`### Scenario\n${clip(M(scenario), 1200)}`);
+  if (chat.world?.trim()) record.push(`### World\n${clip(M(chat.world), 1500)}`);
+  if (chat.story?.trim()) record.push(`### Story premise\n${clip(M(chat.story), 1000)}`);
+  const notes = trackerBlock(chat, history);
+  if (notes) record.push(`### Scene notes (kept automatically)\n${notes.replace(/<\/?scene_notes>/g, '').trim()}`);
+  if (direction) record.push(`### Director's instruction for this reply\nThe human asked for this reply to do the following. Anything it introduces is intended and is NOT a contradiction:\n${M(direction)}`);
   const lore = scanLorebooks(books, [...history, { role: 'char', name: speaker.name, swipes: [reply], swipeIdx: 0 }], nameOf);
   if (lore.activated.length) record.push(`### Lore\n${clip(M(lore.activated.map((e) => e.content).join('\n')), 2500)}`);
   const header = record.join('\n\n');
@@ -428,4 +488,105 @@ export function parsePersonaSplit(raw) {
   const j = JSON.parse(cleaned.slice(a, b + 1));
   if (typeof j.public !== 'string' || typeof j.private !== 'string') throw new Error("Couldn't read the model's answer");
   return { public: j.public.trim(), private: j.private.trim() };
+}
+
+// ---------- Scene tracker ----------
+
+export const TRACKER_PROMPT = `You keep running scene notes for an ongoing roleplay, so the writer can keep track of the scene and of everything that comes and goes.
+
+Given the CURRENT NOTES and the NEW MESSAGES, return what changed, as JSON.
+
+"scene": the scene as of the end of the new messages:
+- "location": where the scene is now
+- "time": time of day / date, if known
+- "present": names of everyone currently in the scene, including {{user}} and the main characters
+- "situation": one sentence on what is happening right now
+Use "" (or []) for anything not known. Repeat unchanged values.
+
+"entries": people (side characters / NPCs), places, objects, and facts that matter to the story, that are NEW in these messages or whose state CHANGED. Each entry:
+- "kind": "character", "place", "object" or "fact"
+- "name": the name used in the story; for unnamed ones, a short description ("the hooded stranger")
+- "aliases": other names or descriptions used for the same thing
+- "details": concise and factual, only what the story established: appearance, role, relationship to the cast, current state, where it is, who has it. When updating, give the complete updated details, not just the change.
+
+Do NOT make entries for {{user}} or the main characters ({{members}}); they have their own sheets. Skip trivial things that won't matter later. Never invent anything the messages don't say.
+
+Respond with JSON only:
+{"scene":{"location":"","time":"","present":[],"situation":""},"entries":[{"kind":"","name":"","aliases":[],"details":""}]}`;
+
+export function emptyTracker() {
+  return { enabled: true, scene: { location: '', time: '', present: [], situation: '' }, entries: [], lastMsgId: null, updatedAt: 0 };
+}
+
+/** Messages for a tracker update covering everything after tracker.lastMsgId. */
+export function buildTrackerUpdate(chat, { settings, characters }) {
+  const tr = chat.tracker || emptyTracker();
+  const userName = settings.persona.name || 'User';
+  const members = chat.characterIds.map((id) => characters[id]).filter(Boolean);
+  const nameOf = (m) => (m.role === 'user' ? userName : m.role === 'narrator' ? 'Narrator' : m.name || characters[m.charId]?.name || 'Character');
+  const msgs = chat.messages.filter((m) => msgText(m).trim());
+  let start = tr.lastMsgId ? msgs.findIndex((m) => m.id === tr.lastMsgId) + 1 : 0;
+  if (start <= 0 && tr.lastMsgId) start = Math.max(0, msgs.length - 4); // marker message was deleted
+  start = Math.max(start, msgs.length - 12);
+  const fresh = msgs.slice(start);
+  const before = msgs.slice(Math.max(0, start - 2), start);
+  const fmtMsgs = (list) => list.map((m) => `${nameOf(m)}: ${msgText(m)}`).join('\n\n');
+  const notes = {
+    scene: tr.scene,
+    entries: tr.entries.map(({ kind, name, aliases, details }) => ({ kind, name, aliases, details })),
+  };
+  const ctx = { user: userName, members: members.map((m) => m.name).join(', '), char: members[0]?.name || '' };
+  return {
+    lastMsgId: fresh.length ? fresh[fresh.length - 1].id : tr.lastMsgId,
+    count: fresh.length,
+    messages: [
+      { role: 'system', content: macros(TRACKER_PROMPT, ctx) },
+      { role: 'user', content: `## CURRENT NOTES\n${JSON.stringify(notes)}\n\n${before.length ? `## EARLIER (already in the notes)\n${fmtMsgs(before)}\n\n` : ''}## NEW MESSAGES\n${fmtMsgs(fresh)}\n\nReturn the JSON.` },
+    ],
+  };
+}
+
+export function parseTrackerUpdate(raw) {
+  const cleaned = String(raw).replace(/```(?:json)?/gi, '');
+  const a = cleaned.indexOf('{');
+  const b = cleaned.lastIndexOf('}');
+  if (a < 0 || b <= a) throw new Error("The tracker didn't return JSON");
+  let j;
+  try { j = JSON.parse(cleaned.slice(a, b + 1)); } catch { throw new Error("Couldn't read the tracker's answer"); }
+  const str = (v) => (typeof v === 'string' ? v.trim() : '');
+  const sc = j.scene || {};
+  return {
+    scene: { location: str(sc.location), time: str(sc.time), present: Array.isArray(sc.present) ? sc.present.map(str).filter(Boolean) : [], situation: str(sc.situation) },
+    entries: (Array.isArray(j.entries) ? j.entries : [])
+      .filter((e) => e && str(e.name))
+      .map((e) => ({
+        kind: ['character', 'place', 'object', 'fact'].includes(str(e.kind)) ? str(e.kind) : 'fact',
+        name: str(e.name), aliases: Array.isArray(e.aliases) ? e.aliases.map(str).filter(Boolean) : [], details: str(e.details),
+      })),
+  };
+}
+
+/** Merges an update into the tracker in place. Locked entries keep their details. */
+export function mergeTracker(tr, update, { exclude = [], uid }) {
+  const skip = new Set(exclude.map(norm));
+  const sc = update.scene;
+  for (const k of ['location', 'time', 'situation']) if (sc[k]) tr.scene[k] = sc[k];
+  if (sc.present.length) tr.scene.present = sc.present;
+  const now = Date.now();
+  let added = 0;
+  for (const e of update.entries) {
+    if (skip.has(norm(e.name))) continue;
+    const keys = [e.name, ...e.aliases].map(norm);
+    const hit = tr.entries.find((x) => [x.name, ...(x.aliases || [])].map(norm).some((k) => keys.includes(k)));
+    if (hit) {
+      hit.aliases = [...new Set([...(hit.aliases || []), ...e.aliases, ...(norm(e.name) !== norm(hit.name) ? [e.name] : [])])].filter((a) => norm(a) !== norm(hit.name));
+      if (!hit.locked && e.details) { hit.details = e.details; hit.kind = e.kind; }
+      hit.lastSeen = now;
+    } else {
+      tr.entries.push({ id: uid(), ...e, pinned: false, locked: false, created: now, lastSeen: now });
+      added++;
+    }
+  }
+  tr.updatedAt = now;
+  return added;
 }

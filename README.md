@@ -63,6 +63,25 @@ In every mode, tap a character's chip above the message box to make them speak n
 * Narrator messages: `/n A storm rolls in.`
 * **⋮ → View last prompt** shows exactly what was sent to the model and which lore entries fired.
 
+**Story & World** (Chat settings): two optional fields for this chat only.
+* **World:** setting, places, rules, factions.
+* **Story:** premise and where the story should head.
+Both are sent to the bot as the frame for the story. The continuity check and scene tracker see them too.
+
+**🎬 Director** (button beside the message box): describe what the next reply should do, like "a hooded stranger bursts in with news of the dragon".
+* It applies to the next round of replies, then clears. Tick **Keep** to leave it on.
+* Regenerating a directed reply reuses its direction.
+* The continuity check knows about it, so things you directed aren't flagged.
+
+**🗺 Scene tracker** (map button in a chat): automatic notes kept for each chat. After each reply, the helper AI records:
+* the current location, time, who's present and what's happening
+* side characters, places, objects and facts that come up (not the main characters, who have their own cards)
+
+The bot is sent the current scene, plus the notes that matter right now: pinned ones, people present, and anything mentioned recently.
+* You can edit, add, pin or delete notes. Editing a note locks it so the tracker won't overwrite your version.
+* Regenerating a reply undoes what the discarded version added.
+* Settings: automatic, manual (Update now), or off.
+
 **Continuity check**
 * After each bot reply, a second request compares it against the chat log, character sheets, your persona and active lore. It flags contradictions, for example:
   * the bot says you did or revealed something you never did
@@ -73,9 +92,10 @@ In every mode, tap a character's chip above the message box to make them speak n
   * **Apply fix** (or **Apply all**) swaps in the suggested text
   * **Ignore** dismisses that issue
   * **Rewrite reply instead** regenerates the reply with the problems spelled out to the model
-* Settings → Continuity check:
+* Settings → Continuity check (the check uses the **Helper AI** connection, see below):
   * run it automatically, only on demand (message menu → Check continuity), or never
-  * optionally use a different connection or a cheaper model for checks
+
+**Helper AI** (Settings): the connection and model for background jobs: continuity checks, the scene tracker and persona splitting. A cheaper or faster model works well.
 
 **Macros:** `{{char}}`, `{{user}}`, `{{members}}`, `{{time}}`, `{{date}}`, `{{random:a,b,c}}`, `{{roll:2d6}}`.
 

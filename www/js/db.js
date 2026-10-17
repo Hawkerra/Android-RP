@@ -83,6 +83,8 @@ export function defaultSettings() {
     showNsfw: false,
     browseSources: ['chub', 'botbooru'],
     continuity: { mode: 'auto', connectionId: '', model: '' },
+    helper: { connectionId: '', model: '' }, // model for background jobs: continuity check, scene tracker, persona split
+    tracker: { mode: 'auto' },
     botbooruUrl: 'https://botbooru.com',
   };
 }
@@ -94,7 +96,10 @@ export async function loadSettings() {
   const s = await db.get('kv', 'settings');
   if (!s) { def.activeConnectionId = def.connections[0].id; await db.put('kv', def); return def; }
   // shallow-merge new defaults into older saves
-  return { ...def, ...s, gen: { ...def.gen, ...s.gen }, prompts: { ...def.prompts, ...s.prompts }, persona: { ...def.persona, ...s.persona }, chatBg: { ...def.chatBg, ...s.chatBg }, continuity: { ...def.continuity, ...s.continuity } };
+  return { ...def, ...s, gen: { ...def.gen, ...s.gen }, prompts: { ...def.prompts, ...s.prompts }, persona: { ...def.persona, ...s.persona }, chatBg: { ...def.chatBg, ...s.chatBg }, continuity: { ...def.continuity, ...s.continuity },
+    // older saves kept the helper model under continuity
+    helper: { ...def.helper, connectionId: s.continuity?.connectionId || '', model: s.continuity?.model || '', ...s.helper },
+    tracker: { ...def.tracker, ...s.tracker } };
 }
 
 export const saveSettings = (s) => db.put('kv', s);
@@ -125,7 +130,8 @@ export function newEntry(over = {}) {
 export function newChat(over = {}) {
   return {
     id: uid(), title: '', personaId: null, characterIds: [], mutedIds: [], lorebookIds: [], groupMode: 'natural',
-    scenario: '', authorNote: '', authorNoteDepth: 4, messages: [],
+    scenario: '', world: '', story: '', director: { text: '', keep: false }, tracker: null,
+    authorNote: '', authorNoteDepth: 4, messages: [],
     created: Date.now(), updated: Date.now(), ...over,
   };
 }

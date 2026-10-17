@@ -10,6 +10,7 @@ import {
 import {
   buildPrompt, generate, cleanReply, listModels, pickSpeakers, macros, estimateTokens,
   buildContinuityCheck, parseContinuity, locateQuote, PERSONA_SPLIT_PROMPT, parsePersonaSplit,
+  emptyTracker, buildTrackerUpdate, parseTrackerUpdate, mergeTracker,
 } from './engine.js';
 import { saveFile, onBack, isNative } from './native.js';
 import {
@@ -52,6 +53,14 @@ const defaultPersona = () => S.personas[S.settings.activePersonaId] || sortByUpd
 const personaFor = (chat) => S.personas[chat?.personaId] || defaultPersona();
 const personaAvatar = (p) => p?.avatar || blankAvatar(p?.name || 'U');
 const activeConn = () => S.settings.connections.find((c) => c.id === S.settings.activeConnectionId) || S.settings.connections[0];
+/** Connection for background jobs (continuity check, scene tracker, persona split). */
+function helperConn() {
+  const h = S.settings.helper;
+  const base = S.settings.connections.find((c) => c.id === h.connectionId) || activeConn();
+  return base && h.model ? { ...base, model: h.model } : base;
+}
+/** Low-temperature, non-streamed settings for helper jobs. */
+const helperGen = (maxTokens) => ({ ...S.settings.gen, temperature: 0.2, top_p: 1, min_p: 0, repetition_penalty: 1, frequency_penalty: 0, presence_penalty: 0, max_tokens: maxTokens, stream: false });
 
 function getPath(obj, path) { return path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj); }
 function setPath(obj, path, val) {
@@ -102,7 +111,11 @@ function route() {
   app.className = '';
   window.scrollTo(0, 0);
   switch (view) {
-    case 'chat': return S.chats[id] ? (sub === 'settings' ? viewChatSettings(S.chats[id]) : viewChat(S.chats[id])) : go('');
+    case 'chat':
+      if (!S.chats[id]) return go('');
+      if (sub === 'settings') return viewChatSettings(S.chats[id]);
+      if (sub === 'tracker') return viewTracker(S.chats[id]);
+      return viewChat(S.chats[id]);
     case 'char': return S.chars[id] ? viewCharEditor(S.chars[id]) : go('');
     case 'lore': return viewLoreEditor(id);
     case 'chub': return viewChub();
@@ -398,9 +411,21 @@ function homeSettings() {
       <option value="auto">Automatically after every reply</option>
       <option value="manual">Only when I ask (message menu → Check continuity)</option>
       <option value="off">Off</option></select></label>
-    <label>Connection for checks<select class="input" data-bind="continuity.connectionId">
+  </section>
+
+  <section class="panel"><h2>Scene tracker</h2>
+    <p class="hint">Keeps notes for each chat on the current scene and on the side characters, places and objects that show up, so the bot doesn't lose track of them. Open it from the 🗺 button in a chat.</p>
+    <label>When to update<select class="input" data-bind="tracker.mode">
+      <option value="auto">Automatically after every reply</option>
+      <option value="manual">Only when I tap Update</option>
+      <option value="off">Off (and don't send notes to the bot)</option></select></label>
+  </section>
+
+  <section class="panel"><h2>Helper AI</h2>
+    <p class="hint">Used for background jobs: continuity checks, the scene tracker and persona splitting. A cheaper or faster model works well here.</p>
+    <label>Connection<select class="input" data-bind="helper.connectionId">
       <option value="">Same as chat</option>${s.connections.map((c) => `<option value="${c.id}">${esc(c.name || c.baseUrl)}</option>`).join('')}</select></label>
-    <label>Model override<input class="input" data-bind="continuity.model" placeholder="Leave empty to use the connection's model" autocapitalize="off" spellcheck="false"></label>
+    <label>Model override<input class="input" data-bind="helper.model" placeholder="Leave empty to use the connection's model" autocapitalize="off" spellcheck="false"></label>
   </section>
 
   <section class="panel"><h2>Prompts</h2>
@@ -756,7 +781,7 @@ function viewPersonaEditor(p) {
 async function splitPersona(p, done) {
   const text = [p.description, p.private].filter((t) => t.trim()).join('\n\n');
   if (!text.trim()) return toast('Write a description first');
-  const conn = activeConn();
+  const conn = helperConn();
   if (!conn?.baseUrl) return toast('Set up an API connection in Settings first');
   toast('Sorting the description…', 30000);
   let result;
@@ -1187,12 +1212,16 @@ function viewChat(chat) {
   app.innerHTML = `<div class="chat-bg" id="chatBg"></div>${header({
     title: `<span data-act="settings">${esc(chatTitle(chat))}</span>`,
     sub: isGroup ? `${members.length} characters · ${{ natural: 'natural order', round: 'round robin', manual: 'manual turns' }[chat.groupMode]}` : '',
-    actions: `<button class="icon-btn" data-act="chatMore" aria-label="Chat options">${ICON.more}</button>`,
+    actions: `<button class="icon-btn" data-act="tracker" aria-label="Scene tracker">${ICON.scene}<span id="trackerDot" class="tdot ${S.trackerStatus?.[chat.id]?.status || ''}"></span></button><button class="icon-btn" data-act="chatMore" aria-label="Chat options">${ICON.more}</button>`,
   })}
   <main class="scroll chat-scroll" id="msgs">${chat.messages.map((m, i) => msgHtml(chat, m, i)).join('') || `<div class="empty"><p>Say something to start the scene.</p></div>`}</main>
   <footer class="composer">
     ${isGroup ? `<div class="speakers">${members.map((m) => `<button class="speaker ${chat.mutedIds.includes(m.id) ? 'muted' : ''}" data-act="speak" data-id="${m.id}"><img src="${avatarOf(m)}" alt=""><span>${esc(m.name.split(' ')[0])}</span></button>`).join('')}</div>` : ''}
-    <div class="row input-row"><textarea id="input" class="input fixed" rows="1" placeholder="${isGroup ? 'Message the group… (/n for narration)' : 'Message… (/n for narration)'}" enterkeyhint="send"></textarea>
+    <div class="director ${chat.director?.text ? 'open' : ''}" id="director">
+      <div class="row"><span class="dir-label">🎬 Next reply should…</span><label class="check small"><input type="checkbox" id="dirKeep" ${chat.director?.keep ? 'checked' : ''}> Keep</label><button class="icon-btn xs" data-act="dirClear" aria-label="Clear direction">✕</button></div>
+      <textarea class="input" id="dirText" rows="2" placeholder="e.g. Have a hooded stranger burst in with news of the dragon">${esc(chat.director?.text || '')}</textarea>
+    </div>
+    <div class="row input-row"><button class="icon-btn tool ${chat.director?.text ? 'on' : ''}" id="dirBtn" data-act="director" aria-label="Director">🎬</button><textarea id="input" class="input fixed" rows="1" placeholder="${isGroup ? 'Message the group… (/n for narration)' : 'Message… (/n for narration)'}" enterkeyhint="send"></textarea>
     <button class="send" id="sendBtn" data-act="send" aria-label="Send">${isGenerating(chat) ? ICON.stop : ICON.send}</button></div>
   </footer>`;
 
@@ -1200,6 +1229,11 @@ function viewChat(chat) {
   const draftKey = 'draft:' + chat.id;
   try { input.value = localStorage.getItem(draftKey) || ''; } catch { /* storage unavailable */ }
   autoGrow(input);
+  const dirText = $('#dirText');
+  const saveDir = debounce(() => saveChat(chat), 500);
+  chat.director ||= { text: '', keep: false };
+  dirText.addEventListener('input', () => { chat.director.text = dirText.value; $('#dirBtn').classList.toggle('on', !!dirText.value.trim()); saveDir(); });
+  $('#dirKeep').addEventListener('change', (e) => { chat.director.keep = e.target.checked; saveChat(chat); });
   input.addEventListener('input', () => { autoGrow(input); try { localStorage.setItem(draftKey, input.value); } catch { /* ignore */ } });
   scrollToBottom(true);
   updateChatBg(chat);
@@ -1207,8 +1241,16 @@ function viewChat(chat) {
   const findMsg = (id) => chat.messages.find((m) => m.id === id);
   handleActs({
     settings: () => go(`/chat/${chat.id}/settings`),
+    tracker: () => go(`/chat/${chat.id}/tracker`),
+    director: () => {
+      const d = $('#director');
+      d.classList.toggle('open');
+      if (d.classList.contains('open')) $('#dirText').focus();
+    },
+    dirClear: () => { chat.director = { text: '', keep: false }; saveChat(chat); updateDirectorUi(chat); $('#director').classList.remove('open'); },
     chatMore: () => menu(chatTitle(chat), [
-      { label: 'Chat settings & members', run: () => go(`/chat/${chat.id}/settings`) },
+      { label: 'Chat settings, story & world', run: () => go(`/chat/${chat.id}/settings`) },
+      { label: 'Scene tracker', run: () => go(`/chat/${chat.id}/tracker`) },
       { label: 'Add a character', run: () => addMembers(chat) },
       { label: `Switch persona (now: ${personaFor(chat).name})`, run: () => switchChatPersona(chat) },
       { label: 'View last prompt', run: showLastPrompt },
@@ -1274,6 +1316,16 @@ async function switchChatPersona(chat) {
   toast(`You are now ${personaFor(chat).name} in this chat`);
   // In the chat itself, refresh only the messages so the input box (and anything typed) survives.
   if (location.hash === '#/chat/' + chat.id && $('#msgs')) renderMessages(chat); else route();
+}
+
+function updateDirectorUi(chat) {
+  if (location.hash !== '#/chat/' + chat.id) return;
+  const t = $('#dirText');
+  if (t && t.value !== chat.director.text) t.value = chat.director.text;
+  const k = $('#dirKeep');
+  if (k) k.checked = !!chat.director.keep;
+  $('#dirBtn')?.classList.toggle('on', !!chat.director.text.trim());
+  if (!chat.director.text.trim()) $('#director')?.classList.remove('open');
 }
 
 function renderMessages(chat) {
@@ -1371,18 +1423,23 @@ async function runTurns(chat, speakers) {
   S.abort = new AbortController();
   S.genChatId = chat.id;
   setSendButton(chat);
+  const direction = chat.director?.text?.trim() || '';
+  let anyOk = false;
   try {
     for (const sp of speakers) {
       if (S.abort.signal.aborted) break;
       const m = newMessage({ role: 'char', charId: sp.id, name: sp.name });
       chat.messages.push(m);
       renderMessages(chat); scrollToBottom(true);
-      const ok = await generateInto(chat, m, sp, 'reply');
+      const ok = await generateInto(chat, m, sp, 'reply', '', direction);
       if (!ok) break;
-      autoCheck(chat, m);
+      anyOk = true;
+      afterReply(chat, m);
     }
   } finally {
     S.abort = null; S.genChatId = null;
+    // A direction applies to one round of replies unless "keep" is on.
+    if (anyOk && direction && !chat.director.keep) { chat.director.text = ''; updateDirectorUi(chat); }
     setSendButton(chat);
     await saveChat(chat);
     if (location.hash.startsWith('#/chat/' + chat.id)) renderMessages(chat);
@@ -1392,14 +1449,15 @@ async function runTurns(chat, speakers) {
 async function regenerate(chat, m, extraInstruction = '') {
   const sp = S.chars[m.charId];
   if (!sp) return toast('That character was deleted');
+  restoreTrackerBefore(chat, m);
   m.swipes.push(''); m.swipeIdx = m.swipes.length - 1;
   rerenderMsg(chat, m);
   S.abort = new AbortController(); S.genChatId = chat.id; setSendButton(chat);
   let ok = false;
-  try { ok = await generateInto(chat, m, sp, 'reply', extraInstruction); } finally {
+  try { ok = await generateInto(chat, m, sp, 'reply', extraInstruction, m.direction || ''); } finally {
     S.abort = null; S.genChatId = null; setSendButton(chat); await saveChat(chat); renderMessages(chat);
   }
-  if (ok) autoCheck(chat, m);
+  if (ok) afterReply(chat, m);
 }
 
 async function continueMsg(chat, m) {
@@ -1407,20 +1465,22 @@ async function continueMsg(chat, m) {
   if (!sp) return;
   S.abort = new AbortController(); S.genChatId = chat.id; setSendButton(chat);
   let ok = false;
-  try { ok = await generateInto(chat, m, sp, 'continue'); } finally {
+  restoreTrackerBefore(chat, m);
+  try { ok = await generateInto(chat, m, sp, 'continue', '', m.direction || ''); } finally {
     S.abort = null; S.genChatId = null; setSendButton(chat); await saveChat(chat); renderMessages(chat);
   }
-  if (ok) autoCheck(chat, m);
+  if (ok) afterReply(chat, m);
 }
 
 /** Fills message m (current swipe) with a generation. Returns false on error/abort. */
-async function generateInto(chat, m, speaker, mode, extraInstruction = '') {
+async function generateInto(chat, m, speaker, mode, extraInstruction = '', direction = '') {
   const conn = activeConn();
   if (!conn?.baseUrl) { toast('Set up an API connection in Settings first'); dropEmpty(chat, m); return false; }
   const idx = chat.messages.indexOf(m);
   const history = mode === 'continue' ? chat.messages.slice(0, idx + 1) : chat.messages.slice(0, idx);
   const base = mode === 'continue' ? msgText(m) : '';
-  const prompt = buildPrompt(chat, speaker, { settings: { ...S.settings, persona: personaFor(chat) }, characters: S.chars, books: booksFor(chat), history, mode, extraInstruction });
+  const prompt = buildPrompt(promptChat(chat), speaker, { settings: { ...S.settings, persona: personaFor(chat) }, characters: S.chars, books: booksFor(chat), history, mode, extraInstruction, direction });
+  if (direction) m.direction = direction;
   S.lastPrompt = { ...prompt, speaker: speaker.name, at: Date.now() };
 
   const join = (t) => (mode === 'continue' ? base + (base && t && !/^[\s,.!?;:'")\]]/.test(t) && !/\s$/.test(base) ? ' ' : '') + t : t);
@@ -1445,8 +1505,13 @@ async function generateInto(chat, m, speaker, mode, extraInstruction = '') {
 
 // ---------- continuity check ----------
 
-function autoCheck(chat, m) {
+/** The chat as the prompt builders should see it (no tracker notes when the tracker is off). */
+const promptChat = (chat) => (S.settings.tracker.mode === 'off' ? { ...chat, tracker: null } : chat);
+
+/** Background jobs after a finished reply: continuity check and scene tracker. */
+function afterReply(chat, m) {
   if (S.settings.continuity.mode === 'auto') checkContinuity(chat, m, { quiet: true });
+  if (S.settings.tracker.mode === 'auto' && chat.tracker?.enabled !== false) updateTracker(chat, { quiet: true });
 }
 
 const showIfVisible = (chat, m) => { if (location.hash === '#/chat/' + chat.id && S.editingMsg !== m.id) rerenderMsg(chat, m); };
@@ -1456,19 +1521,16 @@ async function checkContinuity(chat, m, { quiet = false } = {}) {
   const speaker = S.chars[m.charId];
   const text = msgText(m);
   if (!speaker || !text.trim() || m.check?.status === 'running' && m.check.text === text) return;
-  const cc = S.settings.continuity;
-  const base = S.settings.connections.find((c) => c.id === cc.connectionId) || activeConn();
-  if (!base?.baseUrl) return quiet || toast('Set up an API connection in Settings first');
-  const conn = cc.model ? { ...base, model: cc.model } : base;
+  const conn = helperConn();
+  if (!conn?.baseUrl) return quiet || toast('Set up an API connection in Settings first');
   m.check = { text, status: 'running', issues: [] };
   showIfVisible(chat, m);
   try {
-    const messages = buildContinuityCheck(chat, speaker, text, {
+    const messages = buildContinuityCheck(promptChat(chat), speaker, text, {
       settings: { ...S.settings, persona: personaFor(chat) }, characters: S.chars, books: booksFor(chat),
-      history: chat.messages.slice(0, chat.messages.indexOf(m)),
+      history: chat.messages.slice(0, chat.messages.indexOf(m)), direction: m.direction || '',
     });
-    const gen = { ...S.settings.gen, temperature: 0.2, top_p: 1, min_p: 0, repetition_penalty: 1, frequency_penalty: 0, presence_penalty: 0, max_tokens: 1000, stream: false };
-    const raw = await generate(conn, gen, { messages });
+    const raw = await generate(conn, helperGen(1000), { messages });
     if (msgText(m) !== text) return; // edited while we were checking
     const issues = parseContinuity(raw, text);
     m.check = { text, status: issues.length ? 'issues' : 'ok', issues };
@@ -1479,6 +1541,59 @@ async function checkContinuity(chat, m, { quiet = false } = {}) {
   }
   await saveChat(chat);
   showIfVisible(chat, m);
+}
+
+// ---------- scene tracker ----------
+
+const trackerJobs = new Map(); // chat id -> running update promise
+
+/**
+ * Reads the messages since the last update and merges what the helper model found into chat.tracker.
+ * A snapshot is kept so regenerating the newest reply can undo what the discarded version added.
+ */
+async function updateTracker(chat, { quiet = false } = {}) {
+  if (trackerJobs.has(chat.id)) await trackerJobs.get(chat.id); // one update per chat at a time
+  const conn = helperConn();
+  if (!conn?.baseUrl) return quiet || toast('Set up an API connection in Settings first');
+  chat.tracker ||= emptyTracker();
+  const job = (async () => {
+    const persona = personaFor(chat);
+    const req = buildTrackerUpdate(chat, { settings: { ...S.settings, persona }, characters: S.chars });
+    if (!req.count) return quiet || toast('No new messages to read');
+    setTrackerStatus(chat, 'running');
+    try {
+      const raw = await generate(conn, helperGen(1200), { messages: req.messages });
+      const update = parseTrackerUpdate(raw);
+      chat.trackerUndo = { msgId: req.lastMsgId, snapshot: structuredClone({ ...chat.tracker, lastMsgId: chat.tracker.lastMsgId }) };
+      const exclude = [persona.name, ...chat.characterIds.map((id) => S.chars[id]?.name).filter(Boolean)];
+      const added = mergeTracker(chat.tracker, update, { exclude, uid });
+      chat.tracker.lastMsgId = req.lastMsgId;
+      await saveChat(chat);
+      setTrackerStatus(chat, 'ok');
+      if (!quiet) toast(added ? `Scene updated: ${added} new entr${added > 1 ? 'ies' : 'y'}` : 'Scene updated');
+    } catch (e) {
+      setTrackerStatus(chat, 'error', e.message);
+      if (!quiet) toast('Scene tracker: ' + (e instanceof TypeError ? "couldn't reach the API" : e.message), 5000);
+    }
+  })();
+  trackerJobs.set(chat.id, job);
+  try { await job; } finally { trackerJobs.delete(chat.id); }
+  if (location.hash === `#/chat/${chat.id}/tracker`) route();
+}
+
+/** If m is the reply the last tracker update read, put the tracker back to how it was before. */
+function restoreTrackerBefore(chat, m) {
+  const u = chat.trackerUndo;
+  if (!u || !chat.tracker) return;
+  const idx = chat.messages.indexOf(m);
+  const markIdx = chat.messages.findIndex((x) => x.id === u.msgId);
+  if (markIdx >= idx) { chat.tracker = u.snapshot; chat.trackerUndo = null; }
+}
+
+function setTrackerStatus(chat, status, error = '') {
+  S.trackerStatus = { ...(S.trackerStatus || {}), [chat.id]: { status, error } };
+  const dot = $('#trackerDot');
+  if (dot && location.hash === '#/chat/' + chat.id) { dot.className = 'tdot ' + status; dot.title = error || ''; }
 }
 
 function applyContinuityFix(m, issue) {
@@ -1556,6 +1671,98 @@ async function addMembers(chat) {
   route();
 }
 
+// ---------- scene tracker view ----------
+
+const KIND_ICON = { character: '👤', place: '📍', object: '🗝', fact: '📌' };
+const KIND_LABEL = { character: 'People', place: 'Places', object: 'Objects', fact: 'Facts' };
+
+function viewTracker(chat) {
+  chat.tracker ||= emptyTracker();
+  const tr = chat.tracker;
+  const save = debounce(() => saveChat(chat), 400);
+  const st = S.trackerView ||= { kind: '*', q: '', open: new Set() };
+  const globalOff = S.settings.tracker.mode === 'off';
+
+  const entryHtml = (e) => {
+    const i = tr.entries.indexOf(e);
+    const open = st.open.has(e.id);
+    return `<div class="entry ${open ? 'open' : ''}" data-eid="${e.id}">
+      <div class="entry-head" data-act="toggle" data-id="${e.id}"><span class="k-ic">${KIND_ICON[e.kind] || '📌'}</span>
+        <span class="grow"><b>${esc(e.name)}</b>${e.pinned ? ' <span class="badge accent">pinned</span>' : ''}${e.locked ? ' <span class="badge">🔒</span>' : ''}<br><span class="muted small">${esc(e.details.slice(0, 120))}</span></span></div>
+      ${open ? `<div class="entry-body">
+        <div class="row"><label class="grow">Name<input class="input" data-bind="entries.${i}.name"></label>
+          <label class="narrow">Kind<select class="input" data-bind="entries.${i}.kind">${Object.keys(KIND_ICON).map((k) => `<option value="${k}">${k}</option>`).join('')}</select></label></div>
+        <label>Also called<input class="input" data-bind="entries.${i}.aliases" data-type="list" placeholder="Other names, comma separated"></label>
+        <label>Details<textarea class="input" rows="3" data-bind="entries.${i}.details"></textarea></label>
+        <div class="row wrap"><label class="check"><input type="checkbox" data-bind="entries.${i}.pinned"> Pinned (always sent to the bot)</label>
+          <label class="check"><input type="checkbox" data-bind="entries.${i}.locked"> Locked (tracker won't change it)</label></div>
+        <div class="row end"><button class="btn danger sm" data-act="del" data-i="${i}">Delete</button></div></div>` : ''}</div>`;
+  };
+  const listHtml = () => {
+    const q = st.q.trim().toLowerCase();
+    const list = tr.entries
+      .filter((e) => (st.kind === '*' || e.kind === st.kind) && (!q || [e.name, e.details, ...(e.aliases || [])].join(' ').toLowerCase().includes(q)))
+      .sort((a, b) => (b.pinned - a.pinned) || (b.lastSeen || 0) - (a.lastSeen || 0));
+    return list.map(entryHtml).join('') || `<p class="muted center pad">${tr.entries.length ? 'Nothing matches.' : 'Nothing tracked yet. Entries appear as new people, places and things show up in the story.'}</p>`;
+  };
+  const count = (k) => tr.entries.filter((e) => e.kind === k).length;
+
+  const onField = (path) => {
+    // Hand-edited details stay put: lock the entry so the tracker won't overwrite them.
+    const m = path.match(/^entries\.(\d+)\.(details|name)$/);
+    if (m && !tr.entries[+m[1]].locked) {
+      tr.entries[+m[1]].locked = true;
+      const box = $(`[data-bind="entries.${m[1]}.locked"]`);
+      if (box) box.checked = true;
+    }
+    save();
+  };
+  const render = () => {
+    const status = S.trackerStatus?.[chat.id];
+    app.innerHTML = `${header({ title: 'Scene tracker', sub: esc(chatTitle(chat)), actions: `<button class="btn sm primary" data-act="update" ${status?.status === 'running' ? 'disabled' : ''}>${status?.status === 'running' ? 'Updating…' : 'Update now'}</button>` })}
+    <main class="scroll pad-bottom" id="main">
+      ${globalOff ? '<p class="hint pad">The scene tracker is turned off in Settings, so these notes are not being sent to the bot.</p>' : ''}
+      ${status?.status === 'error' ? `<p class="hint pad err-text">Last update failed: ${esc(status.error)}</p>` : ''}
+      <section class="panel">
+        <label class="check"><input type="checkbox" data-bind="enabled"> Track this chat and send the notes to the bot</label>
+        <p class="muted small">${tr.updatedAt ? `Last updated ${timeAgo(tr.updatedAt) === 'now' ? 'just now' : timeAgo(tr.updatedAt) + ' ago'}` : 'Not updated yet'}${S.settings.tracker.mode === 'manual' ? ' · updates only when you tap Update now' : ''}</p>
+      </section>
+      <section class="panel"><h2>Current scene</h2>
+        <div class="row"><label class="grow">📍 Location<input class="input" data-bind="scene.location"></label><label class="grow">🕰 Time<input class="input" data-bind="scene.time"></label></div>
+        <label>👥 Present<input class="input" data-bind="scene.present" data-type="list" placeholder="Who is in the scene"></label>
+        <label>🎭 Situation<textarea class="input" rows="2" data-bind="scene.situation"></textarea></label>
+      </section>
+      <div class="pad sticky-search"><input class="input" type="search" id="tq" placeholder="Search notes…" value="${esc(st.q)}"></div>
+      <div class="chips">${[['*', `All ${tr.entries.length}`], ...Object.keys(KIND_ICON).map((k) => [k, `${KIND_ICON[k]} ${KIND_LABEL[k]} ${count(k)}`])].map(([k, l]) => `<button class="chip ${st.kind === k ? 'on' : ''}" data-act="kind" data-k="${k}">${l}</button>`).join('')}</div>
+      <div class="entries" id="tlist">${listHtml()}</div>
+      <button class="btn block" data-act="add">${ICON.plus} Add note</button>
+      <div class="center pad"><button class="btn ghost danger sm" data-act="clear">Clear all notes</button></div>
+    </main>`;
+    bindFields($('#main'), tr, onField);
+    $('#tq').addEventListener('input', (e) => { st.q = e.target.value; $('#tlist').innerHTML = listHtml(); bindFields($('#tlist'), tr, onField); });
+  };
+  render();
+
+  handleActs({
+    update: () => { updateTracker(chat); setTimeout(render, 50); },
+    kind: (el) => { st.kind = el.dataset.k; render(); },
+    toggle: (el) => { const id = el.dataset.id; st.open.has(id) ? st.open.delete(id) : st.open.add(id); save.flush(); render(); },
+    add: () => {
+      const e = { id: uid(), kind: st.kind === '*' ? 'character' : st.kind, name: 'New note', aliases: [], details: '', pinned: false, locked: true, created: Date.now(), lastSeen: Date.now() };
+      tr.entries.push(e); st.open.add(e.id); st.q = '';
+      save.flush(); render();
+      $(`[data-eid="${e.id}"]`)?.scrollIntoView({ block: 'center' });
+    },
+    del: async (el) => { if (await confirmBox('Delete this note?', 'Delete', true)) { tr.entries.splice(+el.dataset.i, 1); save.flush(); render(); } },
+    clear: async () => {
+      if (!(await confirmBox('Clear the scene and all notes for this chat? The next update will rebuild them from recent messages only.', 'Clear', true))) return;
+      chat.tracker = { ...emptyTracker(), enabled: tr.enabled };
+      chat.trackerUndo = null;
+      await saveChat(chat); viewTracker(chat);
+    },
+  });
+}
+
 // ---------- chat settings ----------
 
 function viewChatSettings(chat) {
@@ -1578,6 +1785,13 @@ function viewChatSettings(chat) {
         <option value="manual">Manual — nobody replies until you tap a character</option></select></label>
       <p class="hint">In any mode, tap a character's bubble above the message box to make them speak next. Send an empty message to let the scene continue.</p>
     </section>
+    <section class="panel"><h2>Story &amp; World</h2>
+      <p class="hint">Optional, and only for this chat. Use them to set up things the character cards don't cover.</p>
+      <label><span class="sec-title">🌍 World</span><span class="hint">The setting: places, history, magic or tech, factions, rules of the world. Example: "A kingdom where dragons rule the northern peaks and magic is outlawed."</span><textarea class="input" rows="4" data-bind="world"></textarea></label>
+      <label><span class="sec-title">📖 Story</span><span class="hint">The premise and where the story should head over time. Example: "The princess has been taken by the dragon queen; {{user}} sets out to rescue her."</span><textarea class="input" rows="4" data-bind="story"></textarea></label>
+    </section>
+    <section class="panel"><div class="row between"><h2>Scene tracker</h2><button class="btn sm" data-act="tracker">Open</button></div>
+      <p class="hint">Automatic notes on the current scene and the people, places and things that show up in this chat.</p></section>
     <section class="panel"><h2>Scene</h2>
       <label>Scenario override<span class="hint">Replaces the characters' own scenario in this chat.</span><textarea class="input" rows="3" data-bind="scenario"></textarea></label>
       <label>Author's note<span class="hint">Short steering text inserted near the end of the context.</span><textarea class="input" rows="2" data-bind="authorNote"></textarea></label>
@@ -1598,6 +1812,7 @@ function viewChatSettings(chat) {
   });
   handleActs({
     persona: async () => { await switchChatPersona(chat); },
+    tracker: () => go(`/chat/${chat.id}/tracker`),
     add: () => addMembers(chat),
     up: (el) => { const i = +el.dataset.i; [chat.characterIds[i - 1], chat.characterIds[i]] = [chat.characterIds[i], chat.characterIds[i - 1]]; save.flush(); viewChatSettings(chat); },
     remove: async (el) => {

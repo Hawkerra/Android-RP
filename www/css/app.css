@@ -279,3 +279,23 @@ button.pick:active { background: var(--bg3); }
 .cc-diff del { background: rgb(239 93 108 / .12); color: #ffb3bb; padding: 6px 8px; border-radius: 8px; }
 .cc-diff ins { background: rgb(111 207 151 / .12); color: #a8ebc4; padding: 6px 8px; border-radius: 8px; text-decoration: none; }
 .sec-title { display: block; color: var(--fg); font-weight: 600; font-size: 14.5px; }
+
+/* ---------- director ---------- */
+.director { display: none; background: rgb(139 124 246 / .1); border: 1px solid rgb(139 124 246 / .35); border-radius: 12px; padding: 6px 8px 8px; margin-bottom: 6px; }
+.director.open { display: block; }
+.director .row { gap: 6px; margin-bottom: 4px; }
+.director .check { margin: 0 0 0 auto; font-size: 13px; }
+.director .check input { width: 17px; height: 17px; }
+.dir-label { font-weight: 600; font-size: 13.5px; color: #c9c1ff; }
+.director textarea { padding: 7px 10px; font-size: 14px; resize: none; }
+.icon-btn.tool { width: 40px; height: 44px; font-size: 19px; opacity: .55; filter: grayscale(.6); }
+.icon-btn.tool.on { opacity: 1; filter: none; background: rgb(139 124 246 / .2); }
+
+/* ---------- scene tracker ---------- */
+.top .icon-btn { position: relative; }
+.tdot { position: absolute; right: 7px; top: 8px; width: 8px; height: 8px; border-radius: 50%; background: transparent; }
+.tdot.running { background: var(--accent); animation: blink 1.2s infinite; }
+.tdot.error { background: var(--danger); }
+.k-ic { font-size: 18px; width: 24px; text-align: center; flex: none; }
+.entry-head .grow { white-space: normal; }
+.err-text { color: #ff9aa5; }
