@@ -61,6 +61,7 @@ export const DEFAULT_PROMPTS = {
   main: "Write {{char}}'s next reply in a fictional roleplay between {{char}} and {{user}}. Stay in character, be descriptive and proactive, and never write dialogue or actions for {{user}}.",
   group: "This is a group roleplay with several characters: {{members}}. Write only {{char}}'s next reply. Do not write for {{user}} or the other characters.",
   postHistory: '',
+  impersonate: "Write {{user}}'s next post in a fictional roleplay with {{members}}. Write in {{user}}'s own voice, consistent with how {{user}} has written so far: the same person, tense, style and rough length. Only write {{user}}'s own actions, words and thoughts. Never write anything for the other characters.",
   continueNudge: "[OOC: {{user}} has nothing to add this turn. Continue the scene naturally from where it left off, without writing {{user}}'s actions, words or thoughts.]",
 };
 

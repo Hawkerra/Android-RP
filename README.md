@@ -79,6 +79,16 @@ Both are sent to the bot as the frame for the story. The continuity check and sc
 * Regenerating a directed reply reuses its direction.
 * The continuity check knows about it, so things you directed aren't flagged.
 
+**✏️ Rewrite part of a post** (tap a message → Rewrite part…): pick a paragraph, or long-press and highlight any span, then optionally say how to change it.
+* Only that part is rewritten. The AI sees the chat and the rest of the post so it fits in.
+* Preview with regenerate and back/forward.
+* Bot posts get the result as a new swipe (the original is one swipe left). Your own posts are edited in place.
+
+**✍ Write for me:** type a short outline in the message box ("ask about the map, pocket the key") and tap ✍.
+* The AI writes a full post in your persona's voice and style, only your character's actions and words, into the box (not sent) so you can edit it first.
+* Tap ✍ again to rewrite it from the same outline. With an empty box it just continues the scene as you.
+* The prompt it uses is editable in Settings → Prompts.
+
 **Empty send = continue:** tapping send with an empty box sends nothing visible. The bot gets a hidden out-of-character note saying you have nothing to add this turn and to carry the scene on without writing your actions. This also works in Manual group mode. The wording is editable in Settings → Prompts.
 
 **Opening post:** the first message has no story to continue from, so rewriting it asks how the scene should open. This happens when you swipe past the last greeting, choose "Rewrite opening…", or start a chat whose character has no greeting by tapping send with an empty box.

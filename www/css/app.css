@@ -301,3 +301,15 @@ button.pick:active { background: var(--bg3); }
 .err-text { color: #ff9aa5; }
 .gen-row { margin: -4px 0 14px; gap: 10px; }
 .gen-out { background: var(--bg); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; max-height: 40dvh; overflow-y: auto; margin: 4px 0 6px; }
+
+/* ---------- rewrite part / write for me ---------- */
+.rw-src { font-size: 14px; line-height: 1.45; resize: none; user-select: text; -webkit-user-select: text; }
+.rw-src::selection { background: rgb(139 124 246 / .45); }
+.rw-sel { margin: 4px 0 10px; color: var(--muted); }
+.rw-sel .rw-pick { color: var(--fg); font-style: italic; }
+.rw-out .muted { opacity: .6; }
+.rw-new { background: rgb(139 124 246 / .22); color: var(--fg); border-radius: 4px; padding: 0 2px; }
+.chip[data-para].on { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.icon-btn.tool.imp { font-size: 18px; }
+.input-row { gap: 4px; }
+.rw-out { white-space: pre-wrap; }

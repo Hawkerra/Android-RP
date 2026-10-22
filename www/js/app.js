@@ -11,6 +11,7 @@ import {
   buildPrompt, generate, cleanReply, listModels, pickSpeakers, macros, estimateTokens,
   buildContinuityCheck, parseContinuity, locateQuote, PERSONA_SPLIT_PROMPT, parsePersonaSplit,
   emptyTracker, buildTrackerUpdate, parseTrackerUpdate, mergeTracker, openingInstruction,
+  impersonateInstruction, rewriteInstruction, cleanRewrite,
 } from './engine.js';
 import { saveFile, onBack, isNative } from './native.js';
 import {
@@ -433,6 +434,7 @@ function homeSettings() {
     <label>Main system prompt<textarea class="input" rows="4" data-bind="prompts.main"></textarea></label>
     <label>Group chat instruction<textarea class="input" rows="3" data-bind="prompts.group"></textarea></label>
     <label>Post-history instruction (jailbreak / style)<textarea class="input" rows="2" data-bind="prompts.postHistory"></textarea></label>
+    <label>"Write for me" prompt<span class="hint">Used instead of the main prompt when ✍ writes a post as you.</span><textarea class="input" rows="3" data-bind="prompts.impersonate"></textarea></label>
     <label>Hidden "continue" note<span class="hint">Sent invisibly when you send an empty message (or the next character in a group takes a turn), so the bot carries on without input from you. Never shown in the chat.</span><textarea class="input" rows="3" data-bind="prompts.continueNudge"></textarea></label>
     <button class="btn ghost sm" data-act="resetPrompts">Reset prompts to default</button></section>
 
@@ -1315,7 +1317,7 @@ function viewChat(chat) {
       <div class="row"><span class="dir-label">🎬 Next reply should…</span><label class="check small"><input type="checkbox" id="dirKeep" ${chat.director?.keep ? 'checked' : ''}> Keep</label><button class="icon-btn xs" data-act="dirClear" aria-label="Clear direction">✕</button></div>
       <textarea class="input" id="dirText" rows="2" placeholder="e.g. Have a hooded stranger burst in with news of the dragon">${esc(chat.director?.text || '')}</textarea>
     </div>
-    <div class="row input-row"><button class="icon-btn tool ${chat.director?.text ? 'on' : ''}" id="dirBtn" data-act="director" aria-label="Director">🎬</button><textarea id="input" class="input fixed" rows="1" placeholder="${isGroup ? 'Message the group… (/n for narration)' : 'Message… (/n for narration)'}" enterkeyhint="send"></textarea>
+    <div class="row input-row"><button class="icon-btn tool ${chat.director?.text ? 'on' : ''}" id="dirBtn" data-act="director" aria-label="Director">🎬</button><button class="icon-btn tool imp" id="impBtn" data-act="impersonate" aria-label="Write for me">✍</button><textarea id="input" class="input fixed" rows="1" placeholder="${isGroup ? 'Message the group… (/n for narration)' : 'Message… (/n for narration)'}" enterkeyhint="send"></textarea>
     <button class="send" id="sendBtn" data-act="send" aria-label="Send">${isGenerating(chat) ? ICON.stop : ICON.send}</button></div>
   </footer>`;
 
@@ -1336,6 +1338,7 @@ function viewChat(chat) {
   handleActs({
     settings: () => go(`/chat/${chat.id}/settings`),
     tracker: () => go(`/chat/${chat.id}/tracker`),
+    impersonate: () => impersonate(chat),
     director: () => {
       const d = $('#director');
       d.classList.toggle('open');
@@ -1457,6 +1460,7 @@ function msgMenu(chat, m) {
   menu(null, [
     { label: 'Edit', run: () => { S.editingMsg = m.id; renderMessages(chat); } },
     { label: 'Copy text', run: () => { navigator.clipboard?.writeText(msgText(m)).then(() => toast('Copied'), () => toast('Copy failed')); } },
+    m.role !== 'narrator' && { label: 'Rewrite part…', run: () => !S.abort && rewritePart(chat, m) },
     isLastChar && { label: isOpening(chat, m) ? 'Rewrite opening…' : 'Regenerate (new swipe)', run: () => !S.abort && (isOpening(chat, m) ? regenerateOpening(chat, m) : regenerate(chat, m)) },
     isLastChar && { label: 'Continue this message', run: () => !S.abort && continueMsg(chat, m) },
     m.role === 'char' && { label: 'Check continuity', run: () => checkContinuity(chat, m) },
@@ -1469,6 +1473,177 @@ function msgMenu(chat, m) {
       if (await confirmBox(`Delete ${chat.messages.length - idx} messages?`, 'Delete', true)) { chat.messages.splice(idx); saveChat(chat); renderMessages(chat); }
     } },
   ].filter(Boolean));
+}
+
+// ---------- rewrite part of a post ----------
+
+/** Splits text into paragraphs, returning [start, end] ranges (blank lines or single newlines separate them). */
+function paragraphRanges(text) {
+  const out = [];
+  const re = /[^\n]+/g;
+  let m;
+  while ((m = re.exec(text))) if (m[0].trim()) out.push([m.index, m.index + m[0].length]);
+  return out;
+}
+
+/** Widens a selection to whole words so a sloppy thumb-drag doesn't cut a word in half. */
+function snapToWords(text, a, b) {
+  while (a > 0 && /\w/.test(text[a - 1]) && /\w/.test(text[a])) a--;
+  while (b < text.length && /\w/.test(text[b - 1]) && /\w/.test(text[b])) b++;
+  return [a, b];
+}
+
+/**
+ * Lets the player pick a paragraph or highlight any span of message m and have only that part rewritten.
+ * The result is previewed (regenerate / browse) and saved as a new swipe, or in place for the player's own posts.
+ */
+function rewritePart(chat, m) {
+  const text = msgText(m);
+  if (!text.trim()) return;
+  const asUser = m.role !== 'char';
+  const speaker = asUser ? S.chars[chat.characterIds[0]] : S.chars[m.charId];
+  if (!speaker) return toast(asUser ? 'This chat has no characters' : 'That character was deleted');
+  const conn = activeConn();
+  if (!conn?.baseUrl) return toast('Set up an API connection in Settings first');
+  const authorName = nameOf(m, chat);
+  const paras = paragraphRanges(text);
+  let sel = paras.length === 1 ? paras[0] : null;
+  let range = null; // the selection the current results were made for
+  const results = [];
+  let idx = -1;
+  let abort = null;
+  let onSelChange = null;
+
+  const pick = (a, b) => { sel = a < b ? snapToWords(text, a, b) : null; showSel(); };
+  let el;
+  const showSel = () => {
+    $$('[data-para]', el).forEach((c, i) => c.classList.toggle('on', !!sel && sel[0] === paras[i][0] && sel[1] === paras[i][1]));
+    el.querySelector('[data-sel]').innerHTML = sel
+      ? `Selected: <span class="rw-pick">${esc(text.slice(sel[0], sel[1]).trim().slice(0, 90))}${sel[1] - sel[0] > 90 ? '…' : ''}</span>`
+      : '<span class="muted">Nothing selected yet</span>';
+  };
+  const render = (busy) => {
+    const has = idx >= 0;
+    el.querySelector('[data-preview]').innerHTML = has ? `
+      <div class="gen-out rw-out"><span class="muted">${esc(range[2].slice(-60))}</span><mark class="rw-new" data-out>${fmt(results[idx]) || '<span class="typing"><i></i><i></i><i></i></span>'}</mark><span class="muted">${esc(range[3].slice(0, 60))}</span></div>
+      <div class="row between"><div class="swipes"><button class="icon-btn xs" data-nav="-1" ${idx <= 0 || busy ? 'disabled' : ''} aria-label="Previous">${ICON.left}</button><span>${idx + 1}/${results.length}</span><button class="icon-btn xs" data-nav="1" ${idx >= results.length - 1 || busy ? 'disabled' : ''} aria-label="Next">${ICON.right}</button></div>
+        ${busy ? '<button class="btn ghost sm" data-x="stop">Stop</button>' : ''}</div>` : '';
+    el.querySelector('[data-actions]').innerHTML = busy ? '' : has
+      ? `<button class="btn" data-x="gen">↻ Regenerate</button><button class="btn primary" data-x="use">Use this</button>`
+      : `<button class="btn ghost" data-x="close">Cancel</button><button class="btn primary" data-x="gen">Rewrite selection</button>`;
+  };
+
+  const generateOne = async () => {
+    if (!sel) return toast('Tap a paragraph or highlight some text first');
+    const how = el.querySelector('[data-how]').value.trim();
+    if (!range || range[0] !== sel[0] || range[1] !== sel[1]) { results.length = 0; idx = -1; }
+    range = [sel[0], sel[1], text.slice(0, sel[0]), text.slice(sel[1])];
+    const passage = text.slice(sel[0], sel[1]);
+    const idxM = chat.messages.indexOf(m);
+    const prompt = buildPrompt(promptChat(chat), speaker, {
+      settings: { ...S.settings, persona: personaFor(chat) }, characters: S.chars, books: booksFor(chat),
+      history: chat.messages.slice(0, idxM), mode: 'rewrite', asUser,
+      extraInstruction: rewriteInstruction(authorName, range[2], passage, range[3], how),
+    });
+    abort = new AbortController();
+    results.push(''); idx = results.length - 1;
+    render(true);
+    try {
+      const raw = await generate(conn, { ...S.settings.gen, max_tokens: Math.max(150, estimateTokens(passage) * 3 + 80) }, prompt, {
+        signal: abort.signal,
+        onToken: (t) => { results[idx] = cleanRewrite(t, passage); const o = el.querySelector('[data-out]'); if (o) o.innerHTML = fmt(results[idx]); },
+      });
+      results[idx] = cleanRewrite(raw, passage);
+      if (!results[idx].trim()) throw new Error('The model returned nothing');
+    } catch (e) {
+      results.splice(idx, 1); idx = results.length - 1;
+      if (e.name !== 'AbortError') toast(e instanceof TypeError ? "Couldn't reach the API" : e.message, 5000);
+    }
+    abort = null;
+    render(false);
+  };
+
+  sheet(`<h3>✏️ Rewrite part of ${esc(authorName)}'s post</h3>
+    <p class="hint">Tap a paragraph, or long-press in the text and drag to highlight exactly what to change.</p>
+    ${paras.length > 1 ? `<div class="chips wrap flush">${paras.map((p, i) => `<button class="chip" data-para="${i}">¶${i + 1} ${esc(text.slice(p[0], p[1]).trim().slice(0, 22))}…</button>`).join('')}</div>` : ''}
+    <textarea class="input rw-src" rows="7" readonly>${esc(text)}</textarea>
+    <p class="small rw-sel" data-sel></p>
+    <label>How should it change? <span class="hint">Optional, e.g. "more menacing" or "she shouldn't know his name yet". Leave empty for a different take.</span><input class="input" data-how></label>
+    <div data-preview></div>
+    <div class="row wrap end" data-actions></div>`,
+  (sheetEl, close) => {
+    el = sheetEl;
+    const ta = el.querySelector('.rw-src');
+    const readSel = () => { if (ta.selectionEnd > ta.selectionStart) pick(ta.selectionStart, ta.selectionEnd); };
+    ['select', 'mouseup', 'touchend', 'keyup'].forEach((ev) => ta.addEventListener(ev, () => setTimeout(readSel, 0)));
+    onSelChange = () => { if (document.activeElement === ta) readSel(); };
+    document.addEventListener('selectionchange', onSelChange);
+    showSel(); render(false);
+    el.addEventListener('click', async (e) => {
+      const para = e.target.closest('[data-para]');
+      if (para) { const [a, b] = paras[+para.dataset.para]; pick(a, b); ta.focus(); ta.setSelectionRange(a, b); return; }
+      const nav = e.target.closest('[data-nav]');
+      if (nav) { idx = Math.min(results.length - 1, Math.max(0, idx + +nav.dataset.nav)); render(false); return; }
+      const b = e.target.closest('[data-x]');
+      if (!b) return;
+      if (b.dataset.x === 'gen') await generateOne();
+      else if (b.dataset.x === 'stop') abort?.abort();
+      else if (b.dataset.x === 'close') close();
+      else if (b.dataset.x === 'use') {
+        const next = range[2] + results[idx] + range[3];
+        if (asUser) m.swipes[m.swipeIdx] = next; // the player's own post: edit in place
+        else { m.swipes.push(next); m.swipeIdx = m.swipes.length - 1; } // keep the original one swipe back
+        await saveChat(chat);
+        close();
+        renderMessages(chat);
+        toast(asUser ? 'Rewritten' : 'Rewritten — swipe left for the original');
+        if (!asUser && S.settings.continuity.mode === 'auto') checkContinuity(chat, m, { quiet: true });
+      }
+    });
+  }).then(() => { abort?.abort(); document.removeEventListener('selectionchange', onSelChange); });
+}
+
+// ---------- write for me (impersonate) ----------
+
+/**
+ * Expands the outline in the message box into a full post in the player's voice, written into the box (not sent).
+ * Tapping again while the box still holds the last result rewrites from the same outline.
+ */
+async function impersonate(chat) {
+  if (S.impAbort) { S.impAbort.abort(); return; }
+  if (S.abort) return toast('Wait for the current reply to finish');
+  const conn = activeConn();
+  if (!conn?.baseUrl) return toast('Set up an API connection in Settings first');
+  const speaker = S.chars[chat.characterIds[0]];
+  if (!speaker) return toast('This chat has no characters');
+  const input = $('#input');
+  const st = (S.imp ||= {})[chat.id] ||= { outline: '', last: '' };
+  const cur = input.value.trim();
+  if (cur !== st.last) st.outline = cur; // a fresh outline, unless the box still holds the last generated post
+  const persona = personaFor(chat);
+  const prompt = buildPrompt(promptChat(chat), speaker, {
+    settings: { ...S.settings, persona }, characters: S.chars, books: booksFor(chat), history: chat.messages,
+    mode: 'impersonate', extraInstruction: impersonateInstruction(persona.name, st.outline),
+  });
+  S.impAbort = new AbortController();
+  const btn = $('#impBtn');
+  btn.classList.add('on'); btn.textContent = '⏹';
+  input.value = ''; input.placeholder = `Writing as ${persona.name}…`;
+  const show = (t) => { if (location.hash === '#/chat/' + chat.id) { input.value = t; autoGrow(input); } };
+  try {
+    const raw = await generate(conn, S.settings.gen, prompt, { signal: S.impAbort.signal, onToken: (t) => show(cleanReply(t, persona.name, prompt.otherNames)) });
+    show(cleanReply(raw, persona.name, prompt.otherNames));
+  } catch (e) {
+    if (e.name !== 'AbortError') { toast(e instanceof TypeError ? "Couldn't reach the API" : e.message, 5000); if (!input.value) input.value = st.outline; }
+  } finally {
+    S.impAbort = null;
+    st.last = input.value.trim();
+    try { localStorage.setItem('draft:' + chat.id, input.value); } catch { /* ignore */ }
+    if (location.hash === '#/chat/' + chat.id) {
+      btn.classList.remove('on'); btn.textContent = '✍';
+      input.placeholder = chat.characterIds.length > 1 ? 'Message the group… (/n for narration)' : 'Message… (/n for narration)';
+    }
+  }
 }
 
 // ---------- generation flow ----------
@@ -1624,6 +1799,10 @@ async function continueMsg(chat, m) {
 async function generateInto(chat, m, speaker, mode, extraInstruction = '', direction = '') {
   const conn = activeConn();
   if (!conn?.baseUrl) { toast('Set up an API connection in Settings first'); dropEmpty(chat, m); return false; }
+  // If the scene tracker is mid-update (e.g. re-reading a regenerated reply), let it finish so the
+  // prompt gets current notes, but never hold a reply up for more than a few seconds.
+  const pending = trackerJobs.get(chat.id);
+  if (pending) await Promise.race([pending.catch(() => {}), new Promise((r) => setTimeout(r, 8000))]);
   const idx = chat.messages.indexOf(m);
   const history = mode === 'continue' ? chat.messages.slice(0, idx + 1) : chat.messages.slice(0, idx);
   const base = mode === 'continue' ? msgText(m) : '';

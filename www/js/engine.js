@@ -161,7 +161,13 @@ ${text}
  * Builds an OpenAI chat-completions messages array for `speaker` replying in `chat`.
  * opts: { settings, characters (map id->char), lorebooks (array of book objects), mode: 'reply'|'continue' }
  */
-export function buildPrompt(chat, speaker, { settings, characters, books, history, mode = 'reply', extraInstruction = '', direction = '' }) {
+/**
+ * mode: 'reply' | 'continue' | 'impersonate' (write the player's post) | 'rewrite' (rewrite a passage; asUser for the player's own post).
+ * For impersonate/rewrite, extraInstruction is sent as the final user turn.
+ */
+export function buildPrompt(chat, speaker, { settings, characters, books, history, mode = 'reply', extraInstruction = '', direction = '', asUser = false }) {
+  const special = mode === 'impersonate' || mode === 'rewrite';
+  const writingAsUser = mode === 'impersonate' || (mode === 'rewrite' && asUser);
   const persona = settings.persona;
   const userName = persona.name || 'User';
   const members = chat.characterIds.map((id) => characters[id]).filter(Boolean);
@@ -174,8 +180,8 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
 
   // --- System block ---
   const sys = [];
-  sys.push(M(withOriginal(speaker.system_prompt, settings.prompts.main)));
-  if (isGroup) sys.push(M(settings.prompts.group));
+  sys.push(M(writingAsUser ? settings.prompts.impersonate : withOriginal(speaker.system_prompt, settings.prompts.main)));
+  if (isGroup && !writingAsUser) sys.push(M(settings.prompts.group));
   if (lore.before.length) sys.push(M(lore.before.join('\n')));
 
   const defs = (c) => {
@@ -211,15 +217,15 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
   const tail = [];
   const phi = withOriginal(speaker.post_history_instructions, settings.prompts.postHistory);
   if (phi) tail.push(M(phi));
-  if (persona.private) tail.push(`[Reminder: ${userName}'s private background is unknown to the characters. Nobody may mention, know or act on it, or claim ${userName} revealed it, unless it has actually come up in the chat.]`);
+  if (persona.private && !writingAsUser) tail.push(`[Reminder: ${userName}'s private background is unknown to the characters. Nobody may mention, know or act on it, or claim ${userName} revealed it, unless it has actually come up in the chat.]`);
   if (mode === 'continue') tail.push('[Continue ' + speaker.name + "'s last message from exactly where it stopped. Do not repeat it.]");
-  if (extraInstruction) tail.push(extraInstruction);
-  if (direction) tail.push(`[Director's note for this reply: ${M(direction)}\nMake this happen in this reply, naturally and in character, as part of the story. Never mention the note itself.]`);
-  if (isGroup) tail.push(`[Write the next reply only as ${speaker.name}.]`);
+  if (extraInstruction && !special) tail.push(extraInstruction);
+  if (direction && !special) tail.push(`[Director's note for this reply: ${M(direction)}\nMake this happen in this reply, naturally and in character, as part of the story. Never mention the note itself.]`);
+  if (isGroup && !writingAsUser) tail.push(`[Write the next reply only as ${speaker.name}.]`);
 
   // --- History within the context budget ---
   const gen = settings.gen;
-  let budget = gen.context_size - gen.max_tokens - estimateTokens(system) - estimateTokens(tail.join('\n')) - 30;
+  let budget = gen.context_size - gen.max_tokens - estimateTokens(system) - estimateTokens(tail.join('\n')) - estimateTokens(special ? extraInstruction : '') - 30;
   if (chat.authorNote) budget -= estimateTokens(chat.authorNote);
   lore.depth.forEach((d) => { budget -= estimateTokens(d.content); });
 
@@ -246,16 +252,19 @@ export function buildPrompt(chat, speaker, { settings, characters, books, histor
 
   const messages = [{ role: 'system', content: system }, ...hist];
   // With no history yet (an opening post), some APIs reject a prompt that has no user turn.
-  if (!hist.some((h) => h.role === 'user' || h.role === 'assistant')) messages.push({ role: 'user', content: '[Begin the story.]' });
+  if (!special && !hist.some((h) => h.role === 'user' || h.role === 'assistant')) messages.push({ role: 'user', content: '[Begin the story.]' });
   // If the last thing said wasn't the player's (an empty send, or the next speaker in a group round),
   // add a hidden out-of-character note so the model continues instead of waiting for input.
   // It is never stored or shown in the chat.
   const lastSaid = [...history].reverse().find((m) => msgText(m).trim());
-  if (mode !== 'continue' && lastSaid && lastSaid.role !== 'user') messages.push({ role: 'user', content: M(settings.prompts.continueNudge) });
+  if (mode === 'reply' && lastSaid && lastSaid.role !== 'user') messages.push({ role: 'user', content: M(settings.prompts.continueNudge) });
   if (tail.length) messages.push({ role: 'system', content: tail.join('\n') });
+  if (special && extraInstruction) messages.push({ role: 'user', content: M(extraInstruction) });
 
-  const stop = [`\n${userName}:`, ...members.filter((m) => m.id !== speaker.id).map((m) => `\n${m.name}:`)].slice(0, 4);
-  return { messages, stop, lore: lore.activated, otherNames: [userName, ...members.filter((m) => m.id !== speaker.id).map((m) => m.name)] };
+  // Names that mark the model starting to write for someone else.
+  const others = writingAsUser ? members.map((m) => m.name) : [userName, ...members.filter((m) => m.id !== speaker.id).map((m) => m.name)];
+  const stop = others.map((n) => `\n${n}:`).slice(0, 4);
+  return { messages, stop, lore: lore.activated, otherNames: others };
 }
 
 /** Removes a leading "Name:" and cuts off text where the model starts speaking for others. */
@@ -600,4 +609,40 @@ export function mergeTracker(tr, update, { exclude = [], uid }) {
 /** Extra instruction for the first message of a chat, written from the player's guidance. */
 export function openingInstruction(speakerName, userName) {
   return `[This is the very first message of the story. Write ${speakerName}'s opening scene, starting exactly where the director's note says. Establish where and when it begins and what is happening, then leave ${userName} a natural moment to respond. Do not write ${userName}'s actions, words or thoughts.]`;
+}
+
+// ---------- Impersonate & partial rewrite ----------
+
+/** Final instruction for writing the player's next post, optionally from a short outline. */
+export function impersonateInstruction(userName, outline) {
+  const what = outline
+    ? `Expand this outline into a full post. Keep its intent and every action in it, and add natural detail, dialogue and body language:\n${outline}`
+    : 'Continue the scene naturally from where it left off.';
+  return `[OOC: Write ${userName}'s next post now. ${what}\nMatch the person, tense, style and length of ${userName}'s earlier posts. Write only ${userName}'s own actions, words and thoughts. Output only the post itself.]`;
+}
+
+/** Final instruction for rewriting the marked passage of a post and nothing else. */
+export function rewriteInstruction(authorName, before, passage, after, how) {
+  return `[OOC: Rewrite one passage of ${authorName}'s post. Everything outside the ⟦ ⟧ markers stays exactly as it is.
+
+${before}⟦${passage}⟧${after}
+
+Write a new version of only the text between ⟦ and ⟧${how ? `, changed like this: ${how}` : ', clearly different from the current version'}. It must flow seamlessly into the text before and after it, keep the same voice, tense and formatting, and stay consistent with the story so far. Output only the replacement text: no markers, no quotes around it, no commentary.]`;
+}
+
+/** Cleans a model's replacement passage: strips markers, code fences, preambles and wrapping quotes it added. */
+export function cleanRewrite(raw, original) {
+  let t = String(raw);
+  // If the model echoed the markers, the answer is whatever it put between them.
+  const marked = t.match(/⟦([\s\S]*?)⟧/);
+  if (marked) t = marked[1];
+  t = t.replace(/```[a-z]*\n?|```/gi, '').replace(/[⟦⟧]/g, '').trim();
+  const origQuoted = /^["“][\s\S]*["”]$/.test(original.trim());
+  const unwrap = () => { if (!origQuoted && /^["“][\s\S]*["”]$/.test(t)) t = t.slice(1, -1).trim(); };
+  unwrap();
+  t = t.replace(/^(here(?:'s| is)[^\n:]*:|rewritten(?: passage)?:|replacement:)\s*/i, '');
+  unwrap();
+  const lead = original.match(/^\s*/)[0];
+  const trail = original.match(/\s*$/)[0];
+  return lead + t + trail;
 }
