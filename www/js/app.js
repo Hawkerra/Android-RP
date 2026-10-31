@@ -374,7 +374,7 @@ function homeSettings() {
       <label>Type<select class="input" data-cbind="provider"><option value="chub" ${c.provider === 'chub' ? 'selected' : ''}>Chub</option><option value="openai" ${c.provider !== 'chub' ? 'selected' : ''}>OpenAI-compatible</option></select></label>
       <label>API URL<input class="input" data-cbind="baseUrl" value="${esc(c.baseUrl)}" inputmode="url" autocapitalize="off" spellcheck="false"></label>
       <label>API key<div class="row"><input class="input grow" type="password" data-cbind="apiKey" value="${esc(c.apiKey)}" autocomplete="off" autocapitalize="off" spellcheck="false"><button class="btn ghost sm" data-act="toggleKey">Show</button></div></label>
-      <label>Model<input class="input" data-cbind="model" value="${esc(c.model)}" list="models-${c.id}" autocapitalize="off" spellcheck="false"><datalist id="models-${c.id}"></datalist></label>
+      <label>Model<input class="input" data-cbind="model" value="${esc(c.model)}" autocapitalize="off" spellcheck="false" placeholder="e.g. soji, or tap Fetch models"></label>
       <div class="row"><button class="btn sm" data-act="fetchModels" data-id="${c.id}">Fetch models</button><button class="btn sm" data-act="testConn" data-id="${c.id}">Test</button></div>
     </div></div>`).join('');
 
@@ -382,7 +382,7 @@ function homeSettings() {
   const num = (path, label, min, max, step) => `<label class="slider">${label}<output>${getPath(s, path)}</output><input type="range" min="${min}" max="${max}" step="${step}" data-bind="${path}"></label>`;
   return `
   <section class="panel"><h2>API connection</h2>
-    <p class="hint">Paste your Chub API key below (from chub.ai → Account → API Key). You can also add any OpenAI-compatible endpoint (OpenRouter, a local KoboldCPP / text-gen-webui server, etc.).</p>
+    <p class="hint">Paste your Chub API key below (from chub.ai → Account → API Key), then tap Fetch models to pick from the models your Chub plan offers. You can also add any OpenAI-compatible endpoint (OpenRouter, a local KoboldCPP / text-gen-webui server, etc.).</p>
     ${conns}<button class="btn" data-act="addConn">${ICON.plus} Add connection</button></section>
 
   <section class="panel"><h2>Generation</h2>
@@ -486,6 +486,25 @@ function wireSettings() {
   });
 }
 
+/** Searchable list of the models an API offers. Resolves with the chosen id, or undefined. */
+function pickModel(models, current) {
+  const sorted = [...new Set(models)].sort((a, b) => a.localeCompare(b));
+  const rows = (q) => {
+    const k = q.trim().toLowerCase();
+    const hits = k ? sorted.filter((m) => m.toLowerCase().includes(k)).sort((a, b) => b.toLowerCase().startsWith(k) - a.toLowerCase().startsWith(k)) : sorted;
+    return hits.slice(0, 100).map((m) => `<button class="pick pm" data-m="${esc(m)}"><span>${esc(m)}</span>${m === current ? '<b class="ord">✓</b>' : ''}</button>`).join('')
+      + (hits.length > 100 ? `<p class="muted small center">${hits.length - 100} more. Type to narrow it down.</p>` : '')
+      + (!hits.length ? '<p class="muted small center">No match. You can still type any model name in the Model field.</p>' : '');
+  };
+  return sheet(`<h3>Choose a model <span class="muted small">(${sorted.length})</span></h3>
+    <input class="input" type="search" data-f placeholder="Search models…" autocapitalize="off" spellcheck="false">
+    <div class="pick-list" data-list>${rows('')}</div>`,
+  (el, close) => {
+    el.querySelector('[data-f]').addEventListener('input', (e) => { el.querySelector('[data-list]').innerHTML = rows(e.target.value); });
+    el.addEventListener('click', (e) => { const b = e.target.closest('.pm'); if (b) close(b.dataset.m); });
+  });
+}
+
 const settingsActs = {
   addConn: () => {
     const p = CHUB_PRESETS[0];
@@ -505,10 +524,17 @@ const settingsActs = {
   fetchModels: async (el) => {
     const conn = S.settings.connections.find((c) => c.id === el.dataset.id);
     try {
+      el.disabled = true; el.textContent = 'Fetching…';
       const models = await listModels(conn);
-      $(`#models-${conn.id}`).innerHTML = models.map((m) => `<option value="${esc(m)}">`).join('');
-      toast(models.length ? `${models.length} models found — tap the Model field to choose` : 'No models returned');
-    } catch (e) { toast(e.message, 4000); }
+      if (!models.length) return toast('The API returned no models');
+      const chosen = await pickModel(models, conn.model);
+      if (chosen) {
+        conn.model = chosen;
+        el.closest('.conn').querySelector('[data-cbind=model]').value = chosen;
+        persistSettings.flush();
+        toast(`Model set to ${chosen}`);
+      }
+    } catch (e) { toast(e instanceof TypeError ? "Couldn't reach the API" : e.message, 4000); } finally { el.disabled = false; el.textContent = 'Fetch models'; }
   },
   testConn: async (el) => {
     const conn = S.settings.connections.find((c) => c.id === el.dataset.id);

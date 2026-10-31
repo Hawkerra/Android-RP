@@ -12,7 +12,7 @@ Everything is stored on the phone. There's no server and no account.
 
 ## First-time setup
 
-1. **Settings → API connection**. Pick a Chub preset, paste your Chub API key, then tap **Test**.
+1. **Settings → API connection**. Pick the **Chub (Mars)** preset, paste your Chub API key, tap **Fetch models** to choose a model (for example Soji), then tap **Test**.
    * **Fetch models** lists the models the endpoint offers.
    * You can add more connections, such as OpenRouter or a local KoboldCPP / text-generation-webui `…/v1` URL on your Wi-Fi, and switch between them.
 2. **Personas** tab. Edit the default persona (your name and a short description), or make several.

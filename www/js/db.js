@@ -49,13 +49,16 @@ export function uid() {
 
 // ---------- Settings ----------
 
+// Chub serves all its models from one endpoint; pick the model with "Fetch models".
 export const CHUB_PRESETS = [
-  { label: 'Chub – Asha (Mars)', provider: 'chub', baseUrl: 'https://mars.chub.ai/chub/asha/v1', model: 'asha' },
-  { label: 'Chub – Mixtral (Mars)', provider: 'chub', baseUrl: 'https://mars.chub.ai/mixtral/v1', model: 'mixtral' },
-  { label: 'Chub – Mythomax (Mercury)', provider: 'chub', baseUrl: 'https://mercury.chub.ai/mythomax/v1', model: 'mythomax' },
+  { label: 'Chub (Mars)', provider: 'chub', baseUrl: 'https://mars.chub.ai/v1', model: 'soji' },
   { label: 'OpenRouter', provider: 'openai', baseUrl: 'https://openrouter.ai/api/v1', model: '' },
+  { label: 'Featherless', provider: 'openai', baseUrl: 'https://api.featherless.ai/v1', model: '' },
   { label: 'OpenAI-compatible (custom)', provider: 'openai', baseUrl: 'http://192.168.1.10:5001/v1', model: '' },
 ];
+
+// Per-model Chub addresses that Chub has retired, from earlier versions of the preset list.
+const RETIRED_CHUB_URLS = ['https://mars.chub.ai/chub/asha/v1', 'https://mars.chub.ai/mixtral/v1', 'https://mercury.chub.ai/mythomax/v1'];
 
 export const DEFAULT_PROMPTS = {
   main: "Write {{char}}'s next reply in a fictional roleplay between {{char}} and {{user}}. Stay in character, be descriptive and proactive, and never write dialogue or actions for {{user}}.",
@@ -68,7 +71,7 @@ export const DEFAULT_PROMPTS = {
 export function defaultSettings() {
   return {
     id: 'settings',
-    connections: [{ id: uid(), name: 'Chub – Asha', ...pick(CHUB_PRESETS[0], ['provider', 'baseUrl', 'model']), apiKey: '' }],
+    connections: [{ id: uid(), name: 'Chub (Mars)', ...pick(CHUB_PRESETS[0], ['provider', 'baseUrl', 'model']), apiKey: '' }],
     activeConnectionId: null,
     chubApiKey: '',
     gen: {
@@ -99,6 +102,13 @@ export async function loadSettings() {
   // shallow-merge new defaults into older saves
   // upgrade the old default continue note to the OOC wording (custom text is left alone)
   if (s.prompts?.continueNudge === '[Continue the scene naturally from where it left off.]') delete s.prompts.continueNudge;
+  // move connections still on a retired Chub address to the current one
+  for (const c of s.connections || []) {
+    if (!RETIRED_CHUB_URLS.includes(String(c.baseUrl).replace(/\/+$/, ''))) continue;
+    c.baseUrl = 'https://mars.chub.ai/v1';
+    if (['asha', 'mixtral', 'mythomax', ''].includes(c.model)) c.model = 'soji';
+    if (c.name === 'Chub – Asha') c.name = 'Chub (Mars)';
+  }
   return { ...def, ...s, gen: { ...def.gen, ...s.gen }, prompts: { ...def.prompts, ...s.prompts }, persona: { ...def.persona, ...s.persona }, chatBg: { ...def.chatBg, ...s.chatBg }, continuity: { ...def.continuity, ...s.continuity },
     // older saves kept the helper model under continuity
     helper: { ...def.helper, connectionId: s.continuity?.connectionId || '', model: s.continuity?.model || '', ...s.helper },
