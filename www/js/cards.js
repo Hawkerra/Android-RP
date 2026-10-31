@@ -1,7 +1,7 @@
 // Character card (Tavern V1/V2/V3) and lorebook import/export, plus Chub.ai integration.
 import { newCharacter, newLorebook, newEntry } from './db.js';
 import { request } from './native.js';
-import { booruSearch, booruImport } from './booru.js';
+import { botbooruSearch, botbooruImport } from './botbooru.js';
 
 // ---------- PNG tEXt chunk helpers ----------
 
@@ -358,8 +358,8 @@ export const BOT_SOURCES = {
   },
   botbooru: {
     label: 'Botbooru',
-    search: (opts) => booruSearch(opts.botbooruUrl || 'https://botbooru.com', opts, 'botbooru'),
-    importResult: (r) => booruImport(r),
+    search: (opts) => botbooruSearch(opts.botbooruUrl || 'https://botbooru.com', opts),
+    importResult: (r) => botbooruImport(r),
   },
 };
 

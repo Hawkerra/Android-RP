@@ -1,6 +1,6 @@
 // Offline cache for the PWA build (not used inside the Android app).
 const CACHE = 'chatforge-v1';
-const ASSETS = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/db.js', 'js/ui.js', 'js/engine.js', 'js/cards.js', 'js/native.js', 'manifest.webmanifest', 'icons/icon.svg'];
+const ASSETS = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/db.js', 'js/ui.js', 'js/engine.js', 'js/cards.js', 'js/native.js', 'js/botbooru.js', 'manifest.webmanifest', 'icons/icon.svg'];
 self.addEventListener('install', (e) => e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting())));
 self.addEventListener('activate', (e) => e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', (e) => {

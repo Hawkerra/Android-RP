@@ -142,7 +142,7 @@ Desktop browsers block most API calls from a web page (CORS). The Android app se
 | `www/js/app.js` | Screens, chat flow, group turn-taking |
 | `www/js/engine.js` | Prompt building, lorebook scanning, API client |
 | `www/js/cards.js` | Card/lorebook import & export, Chub search/import |
-| `www/js/booru.js` | Botbooru (or any booru-style site) search & card import |
+| `www/js/botbooru.js` | Botbooru search & card import |
 | `www/js/db.js` | IndexedDB storage, defaults, data models |
 | `www/js/native.js` | Android bridges (native HTTP, file saving, back button) |
 

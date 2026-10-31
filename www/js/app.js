@@ -444,7 +444,7 @@ function homeSettings() {
 
   <section class="panel"><h2>Botbooru</h2>
     <label>Site address<input class="input" data-bind="botbooruUrl" inputmode="url" autocapitalize="off" spellcheck="false"></label>
-    <p class="hint">Searched alongside Chub in the bot browser. Works with any booru-style site (Danbooru, Gelbooru, Moebooru, Szurubooru or Philomena software).</p></section>
+    <p class="hint">Searched alongside Chub in the bot browser. Only change this if Botbooru moves to a new address.</p></section>
 
   <section class="panel"><h2>Global lorebooks</h2><p class="hint">Active in every chat.</p>
     ${books.length ? books.map((b) => `<label class="check"><input type="checkbox" data-globalbook value="${b.id}" ${s.globalLorebookIds.includes(b.id) ? 'checked' : ''}> ${esc(b.name)}</label>`).join('') : '<p class="muted">No lorebooks yet.</p>'}</section>
